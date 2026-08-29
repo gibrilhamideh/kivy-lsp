@@ -1,4 +1,3 @@
-
 # src/kivy_lsp/features/completion.py
 
 from __future__ import annotations
@@ -192,7 +191,7 @@ def _to_lsp_item(
         detail=item.detail,
         documentation=item.documentation,
         sort_text=item.sort_text,
-        filter_text=item.label,
+        filter_text=_completion_filter_text(item),
         text_edit=types.TextEdit(
             range=replacement_range,
             new_text=item.insert_text,
@@ -200,9 +199,15 @@ def _to_lsp_item(
     )
 
 
+def _completion_filter_text(item: KvCompletionItem) -> str:
+    if item.insert_text.startswith(("'", '"')):
+        return item.insert_text
+
+    return item.label
+
+
 def _empty_completion_list() -> types.CompletionList:
     return types.CompletionList(
         is_incomplete=False,
         items=[],
     )
-

@@ -6,7 +6,7 @@ from importlib.metadata import version as package_version
 try:
     __version__ = package_version("kivy-lsp")
 except PackageNotFoundError:
-    __version__ = "0.1.0"
+    __version__ = "0.1.1"
 
 
 __all__ = [

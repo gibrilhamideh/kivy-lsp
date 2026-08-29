@@ -10,6 +10,9 @@ from pygls.lsp.server import LanguageServer
 from kivy_lsp import __version__
 from kivy_lsp.config import load_config
 from kivy_lsp.features.completion import register_completion
+from kivy_lsp.features.document_symbols import (
+    register_document_symbols,
+)
 from kivy_lsp.features.documents import register_document_sync
 from kivy_lsp.features.navigation import register_navigation
 from kivy_lsp.features.semantic_tokens import (
@@ -55,6 +58,10 @@ def create_server() -> KivyLanguageServer:
         server.get_project_workspace,
     )
     register_navigation(
+        server,
+        server.get_project_workspace,
+    )
+    register_document_symbols(
         server,
         server.get_project_workspace,
     )
@@ -134,4 +141,3 @@ def _file_uri_to_path(
 
 
 server = create_server()
-

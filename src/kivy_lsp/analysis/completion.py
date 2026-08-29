@@ -1050,7 +1050,11 @@ def _binding_completion(
     else:
         completion_kind = KvCompletionKind.VARIABLE
 
-    documentation = symbol.documentation if symbol is not None else None
+    documentation = (
+        symbol.documentation
+        if symbol is not None
+        else None
+    )
 
     return KvCompletionItem(
         label=binding.name,

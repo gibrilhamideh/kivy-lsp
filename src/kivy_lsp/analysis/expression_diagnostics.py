@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+from dataclasses import dataclass
 
 from kivy_lsp.analysis.expression import (
     KvExpressionResolver,
@@ -72,6 +73,77 @@ _ID_NAMESPACE_MEMBERS = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _ParsedPythonSource:
+    original: str
+    text: str
+    removed_prefixes: tuple[str, ...]
+
+    @classmethod
+    def expression(
+        cls,
+        source: str,
+    ) -> _ParsedPythonSource:
+        lines = source.splitlines(keepends=True)
+
+        return cls(
+            original=source,
+            text=source,
+            removed_prefixes=tuple("" for _ in lines),
+        )
+
+    @classmethod
+    def statement_block(
+        cls,
+        source: str,
+        base_indent: str,
+    ) -> _ParsedPythonSource:
+        lines = source.splitlines(keepends=True)
+        normalized: list[str] = []
+        removed: list[str] = []
+
+        for index, line in enumerate(lines):
+            if (
+                index > 0
+                and base_indent
+                and line.startswith(base_indent)
+            ):
+                normalized.append(line[len(base_indent):])
+                removed.append(base_indent)
+                continue
+
+            normalized.append(line)
+            removed.append("")
+
+        return cls(
+            original=source,
+            text="".join(normalized),
+            removed_prefixes=tuple(removed),
+        )
+
+    def offset(
+        self,
+        line: int,
+        byte_column: int,
+    ) -> int:
+        line_index = max(0, line - 1)
+        removed_prefix = (
+            self.removed_prefixes[line_index]
+            if line_index < len(self.removed_prefixes)
+            else ""
+        )
+        original_column = (
+            len(removed_prefix.encode("utf-8"))
+            + byte_column
+        )
+
+        return _source_offset(
+            self.original,
+            line,
+            original_column,
+        )
+
+
 class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
     """Find invalid names and members in one KV expression."""
 
@@ -83,6 +155,7 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
         self._value_inferer = KvValueInferer(resolver)
         self._type_checker = KivyPropertyTypeChecker()
         self._source = ""
+        self._parsed_source = _ParsedPythonSource.expression("")
         self._expression_span = Span(0, 0)
         self._scope: KvScope | None = None
         self._self_value: KvValue | None = None
@@ -98,22 +171,35 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
         scope: KvScope,
         *,
         self_value: KvValue,
+        statement_block: bool = False,
+        statement_indent: str = "",
     ) -> tuple[Diagnostic, ...]:
-        try:
-            tree = ast.parse(
+        parsed_source = (
+            _ParsedPythonSource.statement_block(
                 source,
-                mode="eval",
+                statement_indent,
+            )
+            if statement_block
+            else _ParsedPythonSource.expression(source)
+        )
+
+        try:
+            tree: ast.AST = ast.parse(
+                parsed_source.text,
+                mode="exec" if statement_block else "eval",
             )
         except SyntaxError as error:
             return (
                 _syntax_diagnostic(
-                    source,
+                    parsed_source,
                     expression_span,
                     error,
+                    statement_block=statement_block,
                 ),
             )
 
-        self._source = source
+        self._source = parsed_source.text
+        self._parsed_source = parsed_source
         self._expression_span = expression_span
         self._scope = scope
         self._self_value = self_value
@@ -122,7 +208,11 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
         self._diagnostics = []
         self._diagnostic_keys = set()
 
-        self.visit(tree.body)
+        if isinstance(tree, ast.Expression):
+            self.visit(tree.body)
+        elif isinstance(tree, ast.Module):
+            for statement in tree.body:
+                self.visit(statement)
 
         return tuple(self._diagnostics)
 
@@ -315,6 +405,32 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
             ),
         )
 
+    def visit_If(
+        self,
+        node: ast.If,
+    ) -> None:
+        self.visit(node.test)
+        truthy = branch_narrowings(
+            node.test,
+            truthy=True,
+        )
+        falsy = branch_narrowings(
+            node.test,
+            truthy=False,
+        )
+
+        for statement in node.body:
+            self._visit_with_narrowings(
+                statement,
+                truthy,
+            )
+
+        for statement in node.orelse:
+            self._visit_with_narrowings(
+                statement,
+                falsy,
+            )
+
     def visit_BoolOp(
         self,
         node: ast.BoolOp,
@@ -345,7 +461,7 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
 
     def _visit_with_narrowings(
         self,
-        node: ast.expr,
+        node: ast.AST,
         narrowings: KvTypeNarrowings,
     ) -> None:
         previous = self._narrowings
@@ -701,11 +817,11 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
         node: ast.AST,
     ) -> Span:
         start = _node_start_offset(
-            self._source,
+            self._parsed_source,
             node,
         )
         end = _node_end_offset(
-            self._source,
+            self._parsed_source,
             node,
         )
 
@@ -719,7 +835,7 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
         node: ast.Attribute,
     ) -> Span:
         end = _node_end_offset(
-            self._source,
+            self._parsed_source,
             node,
         )
         start = max(
@@ -734,7 +850,7 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
 
 
 def _expression_local_names(
-    tree: ast.Expression,
+    tree: ast.AST,
 ) -> frozenset[str]:
     names: set[str] = set()
 
@@ -814,7 +930,7 @@ def _string_constant(
 
 
 def _node_start_offset(
-    source: str,
+    source: _ParsedPythonSource,
     node: ast.AST,
 ) -> int:
     line = getattr(
@@ -828,15 +944,14 @@ def _node_start_offset(
         0,
     )
 
-    return _source_offset(
-        source,
+    return source.offset(
         line,
         column,
     )
 
 
 def _node_end_offset(
-    source: str,
+    source: _ParsedPythonSource,
     node: ast.AST,
 ) -> int:
     line = getattr(
@@ -856,8 +971,7 @@ def _node_end_offset(
     if not isinstance(column, int):
         return _node_start_offset(source, node)
 
-    return _source_offset(
-        source,
+    return source.offset(
         line,
         column,
     )
@@ -892,9 +1006,11 @@ def _source_offset(
     return line_start + len(character_prefix)
 
 def _syntax_diagnostic(
-    source: str,
+    source: _ParsedPythonSource,
     expression_span: Span,
     error: SyntaxError,
+    *,
+    statement_block: bool,
 ) -> Diagnostic:
     start_line = error.lineno or 1
     start_column = max(
@@ -906,25 +1022,29 @@ def _syntax_diagnostic(
         start_column + 1,
         (error.end_offset or start_column + 2) - 1,
     )
-    relative_start = _source_offset(
-        source,
+    relative_start = source.offset(
         start_line,
         start_column,
     )
-    relative_end = _source_offset(
-        source,
+    relative_end = source.offset(
         end_line,
         end_column,
     )
 
     if relative_end <= relative_start:
         relative_end = min(
-            len(source),
+            len(source.original),
             relative_start + 1,
         )
 
+    source_kind = (
+        "event handler"
+        if statement_block
+        else "expression"
+    )
+
     return Diagnostic(
-        message=f"Invalid Python expression: {error.msg}",
+        message=f"Invalid Python {source_kind}: {error.msg}",
         span=Span(
             start=expression_span.start + relative_start,
             end=expression_span.start + relative_end,
@@ -932,4 +1052,3 @@ def _syntax_diagnostic(
         severity=DiagnosticSeverity.ERROR,
         code="kv-invalid-expression",
     )
-

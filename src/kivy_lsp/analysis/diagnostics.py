@@ -25,7 +25,7 @@ from kivy_lsp.kv.parser import ParseResult
 from kivy_lsp.model.diagnostic import Diagnostic
 from kivy_lsp.model.span import Span
 from kivy_lsp.python.index import PythonIndex
-from kivy_lsp.workspace.document import TextDocument
+from kivy_lsp.workspace.document import PositionEncoding, TextDocument
 
 _NON_EXPRESSION_PROPERTIES = frozenset(
     {
@@ -301,8 +301,20 @@ class KvDiagnosticAnalyzer:
                 value_span,
                 scope,
                 self_value=self_value,
+                statement_block=property_node.is_event_handler,
+                statement_indent=(
+                    _statement_indent(
+                        document,
+                        value_span.start,
+                    )
+                    if property_node.is_event_handler
+                    else ""
+                ),
             )
         )
+
+        if property_node.is_event_handler:
+            return
 
         inferred_value = self._value_inferer.infer(
             source,
@@ -345,6 +357,23 @@ def _literal_sequence_length(
         return len(expression.elts)
 
     return None
+
+
+def _statement_indent(
+    document: TextDocument,
+    offset: int,
+) -> str:
+    position = document.position_at(
+        offset,
+        PositionEncoding.UTF32,
+    )
+    line = document.line_text(position.line)
+    prefix = line[:position.character]
+
+    if prefix and not prefix.isspace():
+        return ""
+
+    return prefix
 
 
 def _deduplicate_and_sort(

@@ -34,6 +34,28 @@ jobs:
       - name: Install Python
         run: uv python install 3.12
 
+      - name: Verify release tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          package_version="$(
+            uv run --no-project python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          with Path("pyproject.toml").open("rb") as pyproject:
+              project = tomllib.load(pyproject)["project"]
+
+          print(project["version"])
+          PY
+          )"
+
+          if [ "$RELEASE_TAG" != "v$package_version" ]; then
+            echo "Release tag: $RELEASE_TAG"
+            echo "Package version: $package_version"
+            exit 1
+          fi
+
       - name: Build wheel and source distribution
         run: uv build
 

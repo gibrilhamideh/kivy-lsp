@@ -4,8 +4,8 @@ An experimental language server for Kivy's KV language.
 
 `kivy-lsp` understands the relationship between KV files and the Python
 classes behind them. It provides completion, diagnostics, semantic
-highlighting, hover information, and go-to-definition without importing or
-executing the application.
+highlighting, document symbols, translation intelligence, and navigation
+without importing or executing the application.
 
 This project is an initial preview. Please report false diagnostics and
 completion gaps with a small Python and KV example.
@@ -16,14 +16,12 @@ completion gaps with a small Python and KV example.
 
 - Root and child widget names.
 - Python-backed and dynamic KV classes.
-- Inherited and custom Kivy properties.
+- Inherited, custom, and instance-local Kivy properties.
 - `OptionProperty`, `Literal`, boolean, and nullable values.
 - Names and deep member expressions such as
   `runtime.cycle.state.exists`.
-- Methods and method arguments.
-- Literal choices for annotated method arguments.
+- Methods, method arguments, and annotated literal choices.
 - Kivy IDs and the types of the widgets they reference.
-- Instance-local properties declared directly in a KV widget body.
 - Correct widget scope inside `canvas`, `canvas.before`, and
   `canvas.after` blocks.
 
@@ -41,8 +39,8 @@ self.ids["toolbar"]
 After an ID is selected, member completion uses the widget type declared in
 KV. Go-to-definition on the ID navigates to its `id:` declaration.
 
-Outside Kivy ID expressions, `kivy-lsp` returns no Python completion items, so
-it can run beside a general Python language server.
+Outside Kivy ID expressions, `kivy-lsp` returns no Python completion items,
+so it can run beside a general Python language server.
 
 ### Diagnostics
 
@@ -56,7 +54,7 @@ it can run beside a general Python language server.
 - Duplicate and reserved KV IDs.
 - Invalid translation keys and translation parameters.
 
-### Navigation and hover
+### Navigation, hover, and outlines
 
 Go-to-definition resolves the exact identifier under the cursor:
 
@@ -70,6 +68,9 @@ Go-to-definition resolves the exact identifier under the cursor:
 Hovering over a configured translation key displays its translated text and
 required placeholders.
 
+Hierarchical document symbols expose rules, widgets, properties, events,
+canvas blocks, and `# section:` groups to editor outline views.
+
 ### Semantic highlighting
 
 Semantic tokens distinguish widgets, classes, properties, methods, events,
@@ -81,54 +82,60 @@ The two projects are complementary:
 
 | Project | Responsibility |
 | --- | --- |
-| `kivy-lsp` | Completion, diagnostics, types, navigation, hover, and semantic tokens |
-| `tree-sitter-kivy` | Parsing, editor highlighting, indentation, folding, injections, and structural navigation |
+| `kivy-lsp` | Completion, diagnostics, types, navigation, hover, outlines, and semantic tokens |
+| `tree-sitter-kivy` | Editor parsing, highlighting, indentation, folding, injections, and text structure |
 
-The companion grammar is maintained in the separate
-`tree-sitter-kivy` repository.
+The companion grammar is maintained in
+[`tree-sitter-kivy`](https://github.com/gibrilhamideh/tree-sitter-kivy).
+It is optional for the language server itself, but recommended for the best
+editor experience.
 
 ## Requirements
 
 - Python 3.12 or newer.
 - An editor with Language Server Protocol support.
-- The analyzed project's dependencies available in its virtual environment.
+- The analyzed project's dependencies installed in its virtual environment.
 
 The server first looks for `.venv` or `venv` in the project root. It indexes
 Python source and stubs statically and does not import the application.
 
 ## Installation
 
-After the package is published:
+Install the published command with `uv`:
 
 ```bash
 uv tool install kivy-lsp
+uv tool update-shell
 ```
 
-Alternatively:
+Alternatively, use `pipx`:
 
 ```bash
 pipx install kivy-lsp
 ```
 
-For development from a source checkout:
+Confirm the executable is available, then restart the editor:
 
 ```bash
-git https://github.com/gibrilhamideh/kivy-lsp
+kivy-lsp --help
+```
+
+To work on the server itself, clone the source separately:
+
+```bash
+git clone https://github.com/gibrilhamideh/kivy-lsp.git
 cd kivy-lsp
 uv sync
 uv run kivy-lsp
 ```
 
-
 ## Neovim
 
-Register `.kv` as the `kivy` filetype and attach the server to both `kivy` and
-`python` buffers. The Python filetype enables `self.ids` completion and
+Register `.kv` as the `kivy` filetype and attach the server to both `kivy`
+and `python` buffers. The Python filetype enables `self.ids` completion and
 navigation.
 
-### Installed command
-
-With Neovim 0.11 or newer:
+### Neovim 0.11 or newer
 
 ```lua
 vim.filetype.add({
@@ -152,17 +159,14 @@ vim.lsp.config("kivy_lsp", {
 vim.lsp.enable("kivy_lsp")
 ```
 
-### LazyVim development setup
+### LazyVim with `tree-sitter-kivy`
 
-This configuration uses local sibling checkouts of `kivy-lsp` and
-`tree-sitter-kivy`:
+This example installs the language server from PyPI and the Tree-sitter
+grammar from GitHub. It does not require local repository paths.
 
 ```lua
-local development_root = vim.fn.expand("~/Development/tree-sitter-kivy")
-local ecosystem_root = development_root .. "/kivyfn-ecosystem"
-local kivy_lsp_root = ecosystem_root .. "/kivy-lsp"
-local kivy_tree_sitter_root =
-  ecosystem_root .. "/tree-sitter-kivy"
+local kivy_tree_sitter_url =
+  "https://github.com/gibrilhamideh/tree-sitter-kivy"
 
 return {
   {
@@ -180,16 +184,11 @@ return {
       servers = {
         kivy_lsp = {
           mason = false,
-
-          cmd = {
-            kivy_lsp_root .. "/.venv/bin/kivy-lsp",
-          },
-
+          cmd = { "kivy-lsp" },
           filetypes = {
             "kivy",
             "python",
           },
-
           root_markers = {
             "pyproject.toml",
             ".git",
@@ -203,19 +202,16 @@ return {
     "nvim-treesitter/nvim-treesitter",
 
     init = function()
-      vim.opt.runtimepath:prepend(kivy_tree_sitter_root)
-
       vim.api.nvim_create_autocmd("User", {
         pattern = "TSUpdate",
 
         callback = function()
           require("nvim-treesitter.parsers").kivy = {
-            ---@diagnostic disable-next-line: missing-fields
             install_info = {
-              path = kivy_tree_sitter_root,
+              url = kivy_tree_sitter_url,
+              revision = "v0.1.0",
               queries = "queries/kivy",
             },
-
             tier = 3,
           }
         end,
@@ -225,7 +221,10 @@ return {
     opts = function(_, opts)
       opts.ensure_installed = opts.ensure_installed or {}
 
-      if not vim.tbl_contains(opts.ensure_installed, "kivy") then
+      if not vim.tbl_contains(
+        opts.ensure_installed,
+        "kivy"
+      ) then
         table.insert(opts.ensure_installed, "kivy")
       end
     end,
@@ -250,8 +249,20 @@ return {
 }
 ```
 
-Restart Neovim after changing the configuration. Use `:LspInfo` or
-`:checkhealth vim.lsp` to verify that `kivy-lsp` is attached.
+Run `:TSUpdate kivy` after changing the parser configuration. Restart
+Neovim, then use `:LspInfo`, `:checkhealth vim.lsp`, and `:AerialInfo` to
+verify the integrations.
+
+## Other editors
+
+Use `kivy-lsp` as a standard stdio language server with this command:
+
+```text
+kivy-lsp
+```
+
+Editor-specific packages provide filetype registration, syntax themes, and
+extension installation. Those integrations live outside this repository.
 
 ## Project configuration
 
@@ -277,12 +288,6 @@ runtime = "app.runtime.subscriber.runtime"
 [tool.kivy-lsp.global-imports]
 Formatter = "app.runtime.formatter.Formatter"
 
-[tool.kivy-lsp.member-projections]
-"example.state.StateWrapper" = 1
-
-[tool.kivy-lsp.subscript-projections]
-"example.store.TypedCollection" = 0
-
 [tool.kivy-lsp.i18n]
 source = "src/app/resources/i18n/en.json"
 properties = [
@@ -295,22 +300,18 @@ properties = [
 
 | Key | Purpose |
 | --- | --- |
-| `source-roots` | Python package roots to index. Defaults to `src` when it exists, otherwise the project root. |
+| `source-roots` | Python package roots to index. Defaults to `src` when present, otherwise the project root. |
 | `kv-paths` | Files or directories containing KV files. Defaults to `source-roots`. |
 | `app-class` | Qualified application class used to type the KV `app` binding. |
 | `excludes` | File or directory patterns excluded from Python indexing. |
 | `globals` | Qualified modules, classes, or values available in every KV scope. |
 | `global-imports` | Project-wide equivalents of KV `#: import` declarations. |
-| `member-projections` | Generic argument whose members are exposed by a wrapper type. |
-| `subscript-projections` | Generic argument returned when a wrapper is indexed. |
 | `i18n.source` | One canonical JSON translation catalog. |
 | `i18n.properties` | KV properties that contain translation keys. |
 
-Projection indexes are zero-based.
-
 ### Translation catalog
 
-The first release supports one JSON language file. Nested objects are
+The current release supports one JSON language file. Nested objects are
 flattened into dotted keys:
 
 ```json
@@ -340,9 +341,9 @@ navigates to the corresponding JSON key or placeholder.
 
 ### The server does not attach
 
-1. Confirm `:set filetype?` reports `kivy` in a KV buffer.
-2. Run `kivy-lsp` from a terminal to confirm it is on `PATH`.
-3. Run `:LspInfo` or `:checkhealth vim.lsp`.
+1. Confirm the KV buffer's filetype is `kivy`.
+2. Run `kivy-lsp --help` to confirm the command is on `PATH`.
+3. Check the editor's language-server logs.
 4. Confirm the project contains `pyproject.toml` or `.git`.
 
 ### Project classes are missing
@@ -369,34 +370,23 @@ class Widget:
     ids: _IdsDict
 ```
 
-This affects Pyright diagnostics. Kivy ID completion and navigation are still
-provided by `kivy-lsp`.
-
-### Debug logs
-
-In Neovim:
-
-```lua
-vim.lsp.log.set_level("debug")
-```
-
-Reproduce the problem and open `:LspLog`.
+This affects Pyright diagnostics. Kivy ID completion and navigation are
+still provided by `kivy-lsp`.
 
 ## Current limitations
 
-- Formatting is not implemented.
-- Rename, references, code actions, and document symbols are not implemented.
+- Formatting, rename, references, and code actions are not implemented.
 - Translation intelligence supports one JSON catalog.
 - Highly dynamic Python or KV behavior may require explicit configuration.
 - Tree-sitter must be installed separately for editor-native folding,
-  indentation, injections, and Aerial symbols.
+  indentation, and injections.
 
 ## Development
 
 ```bash
 uv sync
-uv run pyright
 uv run ruff check .
+uv run pyright
 uv run pytest -q
 uv build
 ```
@@ -415,4 +405,3 @@ Pull requests should include regression tests for behavior changes.
 ## License
 
 MIT
-

@@ -75,6 +75,7 @@ class TranslationIndex:
         self._fingerprint: tuple[object, ...] | None = None
         self._source = ""
         self._revision = 0
+        self._overlay: str | None = None
 
     @property
     def configured(self) -> bool:
@@ -111,6 +112,13 @@ class TranslationIndex:
         self.refresh()
         return self._problems
 
+    def set_overlay(self, source: str | None) -> None:
+        """Use unsaved catalog text until its editor overlay is closed."""
+        if source == self._overlay:
+            return
+        self._overlay = source
+        self.refresh(force=True)
+
     def refresh(self, *, force: bool = False) -> bool:
         """Reload the catalog when its filesystem identity changes."""
         path = self.source_path
@@ -118,7 +126,11 @@ class TranslationIndex:
         if path is None:
             return False
 
-        fingerprint = _fingerprint(path)
+        fingerprint = (
+            ("overlay", self._overlay)
+            if self._overlay is not None
+            else _fingerprint(path)
+        )
 
         if not force and fingerprint == self._fingerprint:
             return False
@@ -129,7 +141,11 @@ class TranslationIndex:
         self._source = ""
 
         try:
-            source = path.read_text(encoding="utf-8")
+            source = (
+                self._overlay
+                if self._overlay is not None
+                else path.read_text(encoding="utf-8")
+            )
         except OSError as error:
             self._problems = (
                 TranslationCatalogProblem(
@@ -221,6 +237,7 @@ class _JsonString:
     value: str
     span: Span
     content_span: Span
+    decoded_offsets: tuple[int, ...]
 
 
 class _CatalogParser:
@@ -324,21 +341,12 @@ class _CatalogParser:
             TranslationPlaceholder(
                 name=match.group("name"),
                 span=Span(
-                    start=(
-                        value_token.content_span.start
-                        + match.start()
-                    ),
-                    end=(
-                        value_token.content_span.start
-                        + match.end()
-                    ),
+                    start=value_token.decoded_offsets[match.start()],
+                    end=value_token.decoded_offsets[match.end()],
                 ),
             )
             for match in _PLACEHOLDER_PATTERN.finditer(
-                self._source[
-                    value_token.content_span.start:
-                    value_token.content_span.end
-                ]
+                value_token.value
             )
         )
         self._entries.append(
@@ -386,6 +394,7 @@ class _CatalogParser:
                 start=start + 1,
                 end=end - 1,
             ),
+            decoded_offsets=_decoded_offsets(raw, start),
         )
 
     def _skip_value(self) -> Span:
@@ -418,6 +427,31 @@ class _CatalogParser:
         return self._source[self._offset]
 
 
+def _decoded_offsets(raw: str, start: int) -> tuple[int, ...]:
+    """Map decoded JSON character boundaries to original source offsets."""
+    offsets: list[int] = []
+    index = 1
+    end = len(raw) - 1
+    while index < end:
+        offsets.append(start + index)
+        if raw[index] != "\\":
+            index += 1
+            continue
+        if raw[index + 1] != "u":
+            index += 2
+            continue
+        codepoint = int(raw[index + 2:index + 6], 16)
+        index += 6
+        if (
+            0xD800 <= codepoint <= 0xDBFF
+            and raw[index:index + 2] == "\\u"
+            and 0xDC00 <= int(raw[index + 2:index + 6], 16) <= 0xDFFF
+        ):
+            index += 6
+    offsets.append(start + end)
+    return tuple(offsets)
+
+
 def _fingerprint(path: Path) -> tuple[object, ...]:
     try:
         stat = path.stat()
@@ -433,4 +467,3 @@ def _fingerprint(path: Path) -> tuple[object, ...]:
         stat.st_mtime_ns,
         stat.st_size,
     )
-

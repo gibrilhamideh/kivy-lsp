@@ -10,12 +10,14 @@ from kivy_lsp.model.property import (
     KivyPropertyInfo,
     KivyPropertyKind,
     default_property_info,
+    property_assignment_type,
     property_kind_from_class_name,
 )
 from kivy_lsp.model.value_type import (
     UNKNOWN_TYPE,
     LiteralValue,
     ValueType,
+    ValueTypeKind,
     value_type_from_annotation,
 )
 from kivy_lsp.python.module import ImportBinding
@@ -101,6 +103,16 @@ class KivyPropertyIndexer:
             value,
             kind,
         )
+        if annotation is not None:
+            accepted = value_type_from_annotation(ast.unparse(annotation))
+            if accepted.kind not in {
+                ValueTypeKind.UNKNOWN, ValueTypeKind.ANY,
+            }:
+                info = replace(
+                    info,
+                    accepted_type=property_assignment_type(kind, accepted),
+                )
+
         annotation_text = self._annotation_text(
             annotation,
             value,
@@ -153,29 +165,31 @@ class KivyPropertyIndexer:
         )
         minimum_length = base.sequence_min_length
         maximum_length = base.sequence_max_length
+        allowed_lengths = base.sequence_allowed_lengths
 
         if kind is KivyPropertyKind.VARIABLE_LIST:
-            length = self._integer_value(
-                self._keyword_argument(
-                    call,
-                    "length",
-                )
-            )
-
-            if length is not None and length >= 0:
-                minimum_length = length
-                maximum_length = length
+            length_node = self._keyword_argument(call, "length")
+            if length_node is not None:
+                length = self._integer_value(length_node)
+                if length == 2:
+                    allowed_lengths = (1, 2)
+                elif length == 4:
+                    allowed_lengths = (1, 2, 4)
+                else:
+                    allowed_lengths = ()
 
         return replace(
             base,
             default_type=default_type,
             options=options,
+            options_complete=self._options_complete(call, kind),
             options_reference=options_reference,
             allow_none=allow_none,
             minimum=minimum,
             maximum=maximum,
             sequence_min_length=minimum_length,
             sequence_max_length=maximum_length,
+            sequence_allowed_lengths=allowed_lengths,
         )
 
     def _annotation_text(
@@ -189,8 +203,11 @@ class KivyPropertyIndexer:
             return ast.unparse(annotation)
 
         if kind is KivyPropertyKind.OPTION:
+            values = info.options if info.options_complete else ()
+            if values and info.allow_none and None not in values:
+                values = (*values, None)
             literal_annotation = self._literal_annotation(
-                info.options,
+                values,
             )
 
             if literal_annotation is not None:
@@ -282,6 +299,19 @@ class KivyPropertyIndexer:
 
         return KivyPropertyIndexer._literal_values(
             options_node,
+        )
+
+    @staticmethod
+    def _options_complete(
+        call: ast.Call,
+        kind: KivyPropertyKind,
+    ) -> bool:
+        if kind is not KivyPropertyKind.OPTION:
+            return False
+        node = KivyPropertyIndexer._call_argument(call, 1, "options")
+        return isinstance(node, (ast.List, ast.Tuple, ast.Set)) and all(
+            KivyPropertyIndexer._literal_value(item)[0]
+            for item in node.elts
         )
 
     @staticmethod

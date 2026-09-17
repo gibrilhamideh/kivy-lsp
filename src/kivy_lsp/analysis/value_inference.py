@@ -21,6 +21,8 @@ from kivy_lsp.analysis.type_narrowing import (
     merge_narrowings,
     narrow_value_type,
 )
+from kivy_lsp.kv.expression_source import EmbeddedPythonSource
+from kivy_lsp.model.span import Span
 from kivy_lsp.model.value_type import (
     BOOL_TYPE,
     CALLABLE_TYPE,
@@ -109,6 +111,9 @@ class KvValueInferer:
         narrowings: KvTypeNarrowings | None = None,
     ) -> KvInferredValue:
         """Infer the static type of a complete KV expression."""
+        expression = EmbeddedPythonSource.from_source(
+            expression, Span(0, len(expression)),
+        ).text
         try:
             parsed = ast.parse(
                 expression,
@@ -150,7 +155,10 @@ class KvValueInferer:
                 narrowings,
             )
 
-        if isinstance(node, (ast.BoolOp, ast.Compare)):
+        if isinstance(node, ast.BoolOp):
+            return self._infer_boolean(node, scope, self_value, narrowings)
+
+        if isinstance(node, ast.Compare):
             return KvInferredValue.typed(
                 BOOL_TYPE,
                 KvTypeConfidence.CERTAIN,
@@ -271,10 +279,31 @@ class KvValueInferer:
         )
 
         if _is_numeric(operand.value_type):
-            return KvInferredValue.typed(
-                operand.value_type,
-                operand.confidence,
-            )
+            value_type = operand.value_type
+            if value_type.kind is ValueTypeKind.LITERAL:
+                numbers = value_type.literals
+                numeric_values = tuple(
+                    value for value in numbers
+                    if isinstance(value, (int, float))
+                )
+                if isinstance(node.op, ast.USub):
+                    value_type = literal_type(*(
+                        -value for value in numeric_values
+                    ))
+                elif isinstance(node.op, ast.UAdd):
+                    value_type = literal_type(*(
+                        +value for value in numeric_values
+                    ))
+                elif isinstance(node.op, ast.Invert):
+                    if not all(
+                        isinstance(value, int) for value in numeric_values
+                    ):
+                        return KvInferredValue.unknown()
+                    value_type = literal_type(*(
+                        ~value for value in numeric_values
+                        if isinstance(value, int)
+                    ))
+            return KvInferredValue.typed(value_type, operand.confidence)
 
         return KvInferredValue.unknown()
 
@@ -344,6 +373,46 @@ class KvValueInferer:
             )
 
         return KvInferredValue.unknown()
+
+    def _infer_boolean(
+        self,
+        node: ast.BoolOp,
+        scope: KvScope,
+        self_value: KvValue | None,
+        narrowings: KvTypeNarrowings,
+    ) -> KvInferredValue:
+        candidates: list[ValueType] = []
+        confidence = KvTypeConfidence.CERTAIN
+        continuing = isinstance(node.op, ast.And)
+        active_narrowings = dict(narrowings)
+
+        for index, operand in enumerate(node.values):
+            inferred = self._infer_node(
+                operand, scope, self_value, active_narrowings,
+            )
+            confidence = _combined_confidence(confidence, inferred.confidence)
+            last = index == len(node.values) - 1
+            truth = (
+                bool(inferred.literal)
+                if inferred.literal_known
+                else None
+            )
+            if last or truth is not None and truth != continuing:
+                if not candidates:
+                    return inferred
+                candidates.append(inferred.value_type)
+                break
+            if truth is None:
+                result = _truthiness_type(
+                    inferred.value_type, truthy=not continuing,
+                )
+                if result is not None:
+                    candidates.append(result)
+            active_narrowings.update(
+                branch_narrowings(operand, truthy=continuing),
+            )
+
+        return KvInferredValue.typed(union_type(*candidates), confidence)
 
     def _infer_conditional(
         self,
@@ -663,6 +732,31 @@ def _number_value(
     return None
 
 
+def _truthiness_type(
+    value_type: ValueType,
+    *,
+    truthy: bool,
+) -> ValueType | None:
+    """Retain results that can terminate a short-circuit operation."""
+    if value_type.kind is ValueTypeKind.NONE:
+        return None if truthy else value_type
+    if value_type.kind is ValueTypeKind.LITERAL:
+        values = tuple(
+            value for value in value_type.literals if bool(value) is truthy
+        )
+        return literal_type(*values) if values else None
+    if value_type.kind is ValueTypeKind.UNION:
+        members = tuple(
+            result
+            for member in value_type.arguments
+            if (result := _truthiness_type(member, truthy=truthy)) is not None
+        )
+        return union_type(*members) if members else None
+    if value_type.kind is ValueTypeKind.BOOL:
+        return literal_type(truthy)
+    return value_type
+
+
 def _combined_confidence(
     first: KvTypeConfidence,
     second: KvTypeConfidence,
@@ -761,4 +855,3 @@ def _contains_float(value_type: ValueType) -> bool:
         isinstance(value, float)
         for value in value_type.literals
     )
-

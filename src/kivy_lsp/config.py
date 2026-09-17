@@ -8,6 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
+from kivy_lsp.formatting.options import FormatOptions
+
+CONFIG_FILENAME = "kivy-lsp.toml"
+
 _DEFAULT_EXCLUDES = (
     ".git",
     ".mypy_cache",
@@ -27,6 +31,17 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class DiagnosticOptions:
+    """Control warnings about values that cannot be proven compatible."""
+
+    strict: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.strict, bool):
+            raise ValueError("strict must be a boolean.")
+
+
+@dataclass(frozen=True, slots=True)
 class GlobalImport:
     """One configured name imported into every KV scope."""
 
@@ -35,9 +50,7 @@ class GlobalImport:
 
     def __post_init__(self) -> None:
         if not self.name.isidentifier():
-            raise ValueError(
-                f"Invalid global import name: {self.name!r}."
-            )
+            raise ValueError(f"Invalid global import name: {self.name!r}.")
 
         if not self.target:
             raise ValueError(
@@ -58,6 +71,22 @@ def _empty_global_imports() -> tuple[GlobalImport, ...]:
 
 
 @dataclass(frozen=True, slots=True)
+class LibraryExports:
+    """Library-owned KV bindings and generic projection information."""
+
+    globals: dict[str, str] = field(default_factory=_empty_string_map)
+    global_imports: tuple[GlobalImport, ...] = field(
+        default_factory=_empty_global_imports,
+    )
+    member_projections: dict[str, int] = field(
+        default_factory=_empty_projection_map,
+    )
+    subscript_projections: dict[str, int] = field(
+        default_factory=_empty_projection_map,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class I18nConfig:
     """Configuration for one canonical translation catalog."""
 
@@ -69,20 +98,15 @@ class I18nConfig:
 
     def __post_init__(self) -> None:
         if not self.source.is_absolute():
-            raise ValueError(
-                "Translation source path must be absolute."
-            )
+            raise ValueError("Translation source path must be absolute.")
 
         if not self.properties:
-            raise ValueError(
-                "Translation property names cannot be empty."
-            )
+            raise ValueError("Translation property names cannot be empty.")
 
         for name in self.properties:
             if not name.isidentifier():
                 raise ValueError(
-                    "Invalid translation property name: "
-                    f"{name!r}."
+                    f"Invalid translation property name: {name!r}."
                 )
 
 
@@ -108,10 +132,21 @@ class ServerConfig:
     )
     i18n: I18nConfig | None = None
     excludes: tuple[str, ...] = _DEFAULT_EXCLUDES
+    format: FormatOptions = field(default_factory=FormatOptions)
+    python_environment: Path | None = None
+    python_interpreter: Path | None = None
+    diagnostics: DiagnosticOptions = field(default_factory=DiagnosticOptions)
 
     def __post_init__(self) -> None:
         if not self.project_root.is_absolute():
             raise ValueError("Project root must be absolute.")
+
+        for path in (self.python_environment, self.python_interpreter):
+            if path is not None and not path.is_absolute():
+                raise ValueError("Python environment paths must be absolute.")
+
+        if self.python_environment and self.python_interpreter:
+            raise ValueError("Select an environment or interpreter, not both.")
 
         for source_root in self.source_roots:
             if not source_root.is_absolute():
@@ -123,31 +158,24 @@ class ServerConfig:
 
         for name, target in self.globals.items():
             if not name.isidentifier():
-                raise ValueError(
-                    f"Invalid KV global name: {name!r}."
-                )
+                raise ValueError(f"Invalid KV global name: {name!r}.")
 
             if not target:
-                raise ValueError(
-                    f"KV global {name!r} has an empty target."
-                )
+                raise ValueError(f"KV global {name!r} has an empty target.")
 
         global_import_names: set[str] = set()
 
         for imported in self.global_imports:
             if imported.name in global_import_names:
                 raise ValueError(
-                    "Duplicate global import name: "
-                    f"{imported.name!r}."
+                    f"Duplicate global import name: {imported.name!r}."
                 )
 
             global_import_names.add(imported.name)
 
         for pattern in self.excludes:
             if not pattern.strip():
-                raise ValueError(
-                    "Exclude patterns cannot be empty."
-                )
+                raise ValueError("Exclude patterns cannot be empty.")
 
         self._validate_projections(
             self.member_projections,
@@ -232,105 +260,151 @@ class ServerConfig:
         )
 
 
+def find_project_root(path: Path) -> Path:
+    """Prefer dedicated configuration within the nearest Git boundary."""
+    directory = path.resolve()
+    if not directory.is_dir():
+        directory = directory.parent
+    fallback: Path | None = None
+    for candidate in (directory, *directory.parents):
+        if (candidate / CONFIG_FILENAME).is_file():
+            return candidate
+        git_boundary = (candidate / ".git").exists()
+        if fallback is None and (
+            (candidate / "pyproject.toml").is_file() or git_boundary
+        ):
+            fallback = candidate
+        if git_boundary:
+            break
+    return fallback or directory
+
+
 def load_config(project_root: Path) -> ServerConfig:
-    """Load kivy-lsp configuration from a project pyproject.toml."""
+    """Load project settings exclusively from its kivy-lsp.toml file."""
     root = project_root.resolve()
-    pyproject_path = root / "pyproject.toml"
+    config_path = root / CONFIG_FILENAME
     default_source_roots = _default_source_roots(root)
 
-    if not pyproject_path.is_file():
+    if not config_path.exists():
         return ServerConfig(
             project_root=root,
             source_roots=default_source_roots,
             kv_paths=default_source_roots,
         )
 
-    try:
-        with pyproject_path.open("rb") as pyproject_file:
-            raw_data: object = tomllib.load(pyproject_file)
-    except (OSError, tomllib.TOMLDecodeError) as error:
-        raise ConfigError(
-            f"Could not load {pyproject_path}: {error}"
-        ) from error
-
-    root_table = _table(
-        raw_data,
-        "pyproject.toml",
-    )
-    tool_table = _optional_table(
-        root_table.get("tool"),
-        "tool",
-    )
-    config_table = _optional_table(
-        tool_table.get("kivy-lsp"),
-        "tool.kivy-lsp",
-    )
-
+    config_table = _read_config_table(config_path)
+    exports = _library_exports(config_table)
     source_roots = _path_list(
         root,
         config_table.get("source-roots"),
         default=default_source_roots,
-        name="tool.kivy-lsp.source-roots",
+        name="source-roots",
     )
     kv_paths = _path_list(
         root,
         config_table.get("kv-paths"),
         default=source_roots,
-        name="tool.kivy-lsp.kv-paths",
+        name="kv-paths",
     )
-    app_class = _optional_string(
-        config_table.get("app-class"),
-        "tool.kivy-lsp.app-class",
-    )
-    global_table = _optional_table(
-        config_table.get("globals"),
-        "tool.kivy-lsp.globals",
-    )
-    global_import_table = _optional_table(
-        config_table.get("global-imports"),
-        "tool.kivy-lsp.global-imports",
-    )
-    member_projection_table = _optional_table(
-        config_table.get("member-projections"),
-        "tool.kivy-lsp.member-projections",
-    )
-    subscript_projection_table = _optional_table(
-        config_table.get("subscript-projections"),
-        "tool.kivy-lsp.subscript-projections",
-    )
+    app_class = _optional_string(config_table.get("app-class"), "app-class")
     excludes = _string_list(
         config_table.get("excludes"),
         default=_DEFAULT_EXCLUDES,
-        name="tool.kivy-lsp.excludes",
+        name="excludes",
     )
+    format_table = _optional_table(config_table.get("format"), "format")
+    try:
+        format_options = FormatOptions(
+            line_length=cast(int, format_table.get("line-length", 79)),
+        )
+    except ValueError as error:
+        raise ConfigError(f"format: {error}") from error
+
+    diagnostics_table = _optional_table(
+        config_table.get("diagnostics"), "diagnostics",
+    )
+    try:
+        diagnostics_options = DiagnosticOptions(
+            strict=cast(bool, diagnostics_table.get("strict", False)),
+        )
+    except ValueError as error:
+        raise ConfigError(f"diagnostics: {error}") from error
+
+    environment = _optional_path(root, config_table, "python-environment")
+    interpreter = _optional_path(root, config_table, "python-interpreter")
+    if environment is not None and interpreter is not None:
+        raise ConfigError(
+            "Set only one of python-environment and python-interpreter."
+        )
 
     return ServerConfig(
         project_root=root,
         source_roots=source_roots,
         kv_paths=kv_paths,
         app_class=app_class,
-        globals=_string_map(
-            global_table,
-            "tool.kivy-lsp.globals",
+        globals=exports.globals,
+        member_projections=exports.member_projections,
+        subscript_projections=exports.subscript_projections,
+        global_imports=exports.global_imports,
+        i18n=_i18n_config(root, config_table.get("i18n")),
+        excludes=excludes,
+        format=format_options,
+        python_environment=environment,
+        python_interpreter=interpreter,
+        diagnostics=diagnostics_options,
+    )
+
+
+def load_library_exports(path: Path) -> LibraryExports:
+    """Read library-owned exports without applying project-only settings."""
+    return _library_exports(_read_config_table(path))
+
+
+def _read_config_table(path: Path) -> dict[str, object]:
+    try:
+        with path.open("rb") as config_file:
+            raw_data: object = tomllib.load(config_file)
+    except (OSError, tomllib.TOMLDecodeError, UnicodeError) as error:
+        raise ConfigError(f"Could not load {path}: {error}") from error
+    table = _table(raw_data, str(path))
+    if "tool" in table or "kivy-lsp" in table:
+        raise ConfigError(
+            f"{path}: put settings at the root of {CONFIG_FILENAME}; "
+            "remove the [tool.kivy-lsp] wrapper and tool.kivy-lsp. "
+            "prefixes from section names."
+        )
+    return table
+
+
+def _library_exports(table: dict[str, object]) -> LibraryExports:
+    def export_table(name: str) -> dict[str, object]:
+        return _optional_table(table.get(name), name)
+
+    return LibraryExports(
+        globals=_string_map(export_table("globals"), "globals"),
+        global_imports=_global_import_list(
+            export_table("global-imports"), "global-imports",
         ),
         member_projections=_projection_map(
-            member_projection_table,
-            "tool.kivy-lsp.member-projections",
+            export_table("member-projections"), "member-projections",
         ),
         subscript_projections=_projection_map(
-            subscript_projection_table,
-            "tool.kivy-lsp.subscript-projections",
+            export_table("subscript-projections"), "subscript-projections",
         ),
-        global_imports=_global_import_list(
-            global_import_table,
-            "tool.kivy-lsp.global-imports",
-        ),
-        i18n=_i18n_config(
-            root,
-            config_table.get("i18n"),
-        ),
-        excludes=excludes,
     )
+
+
+def _optional_path(
+    root: Path, table: dict[str, object], key: str
+) -> Path | None:
+    value = _optional_string(table.get(key), key)
+    if value is None:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    # Keep an interpreter's venv path even when the executable is a symlink.
+    return path.absolute()
 
 
 def _default_source_roots(
@@ -362,9 +436,7 @@ def _path_list(
 
     for item in values:
         if not isinstance(item, str) or not item:
-            raise ConfigError(
-                f"{name} entries must be non-empty strings."
-            )
+            raise ConfigError(f"{name} entries must be non-empty strings.")
 
         path = Path(item)
 
@@ -389,18 +461,14 @@ def _string_list(
         return default
 
     if not isinstance(value, list):
-        raise ConfigError(
-            f"{name} must be an array of strings."
-        )
+        raise ConfigError(f"{name} must be an array of strings.")
 
     values = cast(list[object], value)
     result: list[str] = []
 
     for item in values:
         if not isinstance(item, str) or not item.strip():
-            raise ConfigError(
-                f"{name} entries must be non-empty strings."
-            )
+            raise ConfigError(f"{name} entries must be non-empty strings.")
 
         result.append(item)
 
@@ -414,10 +482,10 @@ def _string_map(
     result: dict[str, str] = {}
 
     for key, value in table.items():
-        if not isinstance(value, str) or not value:
-            raise ConfigError(
-                f"{name}.{key} must be a non-empty string."
-            )
+        if not key.isidentifier():
+            raise ConfigError(f"{name} contains an invalid name: {key!r}.")
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"{name}.{key} must be a non-empty string.")
 
         result[key] = value
 
@@ -433,14 +501,12 @@ def _global_import_list(
     for import_name, target in table.items():
         if not import_name.isidentifier():
             raise ConfigError(
-                f"{name} contains an invalid name: "
-                f"{import_name!r}."
+                f"{name} contains an invalid name: {import_name!r}."
             )
 
-        if not isinstance(target, str) or not target:
+        if not isinstance(target, str) or not target.strip():
             raise ConfigError(
-                f"{name}.{import_name} must be a "
-                "non-empty string."
+                f"{name}.{import_name} must be a non-empty string."
             )
 
         imports.append(
@@ -460,11 +526,9 @@ def _projection_map(
     result: dict[str, int] = {}
 
     for type_name, value in table.items():
-        if (
-            not isinstance(value, int)
-            or isinstance(value, bool)
-            or value < 0
-        ):
+        if not type_name.strip():
+            raise ConfigError(f"{name} type names cannot be empty.")
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ConfigError(
                 f"{name}.{type_name} must be a non-negative integer."
             )
@@ -485,16 +549,7 @@ def _projection_for(
 
     short_name = type_name.rsplit(".", maxsplit=1)[-1]
 
-    for configured_name, argument_index in projections.items():
-        configured_short_name = configured_name.rsplit(
-            ".",
-            maxsplit=1,
-        )[-1]
-
-        if configured_short_name == short_name:
-            return argument_index
-
-    return None
+    return projections.get(short_name)
 
 
 def _i18n_config(
@@ -506,13 +561,13 @@ def _i18n_config(
 
     table = _table(
         value,
-        "tool.kivy-lsp.i18n",
+        "i18n",
     )
     source_value = table.get("source")
 
     if not isinstance(source_value, str) or not source_value.strip():
         raise ConfigError(
-            "tool.kivy-lsp.i18n.source must be a non-empty path."
+            "i18n.source must be a non-empty path."
         )
 
     source = Path(source_value)
@@ -526,13 +581,15 @@ def _i18n_config(
             "i18n_key",
             "hint_i18n_key",
         ),
-        name="tool.kivy-lsp.i18n.properties",
+        name="i18n.properties",
     )
+    if not properties:
+        raise ConfigError("i18n.properties cannot be empty.")
 
     for property_name in properties:
         if not property_name.isidentifier():
             raise ConfigError(
-                "tool.kivy-lsp.i18n.properties contains an "
+                "i18n.properties contains an "
                 f"invalid name: {property_name!r}."
             )
 
@@ -578,4 +635,3 @@ def _table(
         raise ConfigError(f"{name} keys must be strings.")
 
     return cast(dict[str, object], raw_table)
-

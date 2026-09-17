@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, replace
 
 from kivy_lsp.model.diagnostic import (
     Diagnostic,
@@ -104,8 +105,21 @@ class _ModuleIndexer:
 
         classes: list[ClassSymbol] = []
         symbols: list[Symbol] = []
+        statements = tuple(_module_statements(tree.body))
+        binding_counts = self._module_binding_counts(statements, imports)
+        alias_annotations = self._type_alias_annotations(
+            imports, binding_counts,
+        )
+        alias_names: set[str] = set()
+        for statement in statements:
+            if isinstance(statement, ast.TypeAlias):
+                alias_names.add(statement.name.id)
+            elif self._is_legacy_type_alias(statement, alias_annotations):
+                assert isinstance(statement, ast.AnnAssign)
+                assert isinstance(statement.target, ast.Name)
+                alias_names.add(statement.target.id)
 
-        for statement in tree.body:
+        for statement in statements:
             if isinstance(statement, (ast.Import, ast.ImportFrom)):
                 continue
 
@@ -133,15 +147,44 @@ class _ModuleIndexer:
                     )
                 )
             elif isinstance(statement, ast.AnnAssign):
-                symbols.extend(
-                    self._assignment_symbols(
-                        statement=statement,
-                        targets=(statement.target,),
-                        value=statement.value,
-                        annotation=statement.annotation,
-                        container=self._module_name,
+                if self._is_legacy_type_alias(statement, alias_annotations):
+                    assert isinstance(statement.target, ast.Name)
+                    symbols.append(self._type_alias_symbol(
+                        statement, statement.target,
+                        supported=(
+                            statement in tree.body
+                            and binding_counts[statement.target.id] == 1
+                        ),
+                    ))
+                else:
+                    symbols.extend(
+                        self._assignment_symbols(
+                            statement=statement,
+                            targets=(statement.target,),
+                            value=statement.value,
+                            annotation=statement.annotation,
+                            container=self._module_name,
+                        )
                     )
-                )
+            elif isinstance(statement, ast.TypeAlias):
+                name = statement.name.id
+                symbols.append(self._type_alias_symbol(
+                    statement, statement.name,
+                    supported=(
+                        not statement.type_params
+                        and statement in tree.body
+                        and binding_counts[name] == 1
+                    ),
+                ))
+
+        symbols = [
+            replace(
+                symbol, is_type_alias=True, annotation=None, literal_values=(),
+            )
+            if symbol.name in alias_names and binding_counts[symbol.name] > 1
+            else symbol
+            for symbol in symbols
+        ]
 
         factory_names = self._factory_local_names(imports)
         factory_registrations = self._index_factory_registrations(
@@ -161,13 +204,125 @@ class _ModuleIndexer:
             factory_registrations=factory_registrations,
         )
 
+    def _type_alias_symbol(
+        self,
+        statement: ast.TypeAlias | ast.AnnAssign,
+        name_node: ast.Name,
+        *,
+        supported: bool,
+    ) -> Symbol:
+        name = name_node.id
+        return Symbol(
+            name=name,
+            qualified_name=f"{self._module_name}.{name}",
+            kind=SymbolKind.VARIABLE,
+            location=self._location_from_selection(
+                node=statement, selection=name_node,
+            ),
+            annotation=(
+                self._annotation(statement.value) if supported else None
+            ),
+            literal_values=(
+                self._literal_sequences.get(name, ()) if supported else ()
+            ),
+            is_type_alias=True,
+        )
+
+    @staticmethod
+    def _is_legacy_type_alias(
+        statement: ast.stmt, annotations: set[str],
+    ) -> bool:
+        if not isinstance(statement, ast.AnnAssign):
+            return False
+        if not isinstance(statement.target, ast.Name):
+            return False
+        annotation = statement.annotation
+        if isinstance(annotation, ast.Constant):
+            if not isinstance(annotation.value, str):
+                return False
+            try:
+                annotation = ast.parse(annotation.value, mode="eval").body
+            except SyntaxError:
+                return False
+        name = _ModuleIndexer._qualified_expression(annotation)
+        return name in annotations
+
+    @staticmethod
+    def _type_alias_annotations(
+        imports: list[ImportBinding], binding_counts: dict[str, int],
+    ) -> set[str]:
+        roots: dict[str, list[ImportBinding]] = {}
+        for binding in imports:
+            roots.setdefault(binding.local_name, []).append(binding)
+        annotations: set[str] = set()
+        for root, bindings in roots.items():
+            if binding_counts[root] != len(bindings):
+                continue
+            names: set[str] = set()
+            for binding in bindings:
+                if (
+                    binding.relative_level
+                    or binding.target_module not in {
+                        "typing", "typing_extensions",
+                    }
+                    or binding.target_name not in {None, "TypeAlias"}
+                ):
+                    break
+                name = (
+                    root if binding.target_name else f"{root}.TypeAlias"
+                )
+                names.add(name)
+            else:
+                if len(names) == 1:
+                    annotations.update(names)
+        return annotations
+
+    @staticmethod
+    def _module_binding_counts(
+        statements: tuple[ast.stmt, ...], imports: list[ImportBinding],
+    ) -> dict[str, int]:
+        counts: dict[str, int] = {}
+
+        def record(name: str) -> None:
+            counts[name] = counts.get(name, 0) + 1
+
+        for binding in imports:
+            record(binding.local_name)
+        for statement in statements:
+            targets: tuple[ast.expr, ...] = ()
+            if isinstance(statement, (ast.Assign, ast.Delete)):
+                targets = tuple(statement.targets)
+            elif isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
+                targets = (statement.target,)
+            elif isinstance(statement, (ast.For, ast.AsyncFor)):
+                targets = (statement.target,)
+            elif isinstance(statement, (ast.With, ast.AsyncWith)):
+                targets = tuple(
+                    item.optional_vars for item in statement.items
+                    if item.optional_vars is not None
+                )
+            elif isinstance(statement, ast.TypeAlias):
+                record(statement.name.id)
+            elif isinstance(statement, (
+                ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef,
+            )):
+                record(statement.name)
+            elif isinstance(statement, (ast.Try, ast.TryStar)):
+                for handler in statement.handlers:
+                    if handler.name is not None:
+                        record(handler.name)
+            for target in targets:
+                for name_node in _ModuleIndexer._name_targets(target):
+                    record(name_node.id)
+        return counts
+
     def _index_imports(
         self,
         tree: ast.Module,
     ) -> list[ImportBinding]:
         imports: list[ImportBinding] = []
 
-        for statement in tree.body:
+        for statement in _module_statements(tree.body):
             if isinstance(statement, ast.Import):
                 imports.extend(self._index_import(statement))
             elif isinstance(statement, ast.ImportFrom):
@@ -336,11 +491,14 @@ class _ModuleIndexer:
                 statement,
                 (ast.FunctionDef, ast.AsyncFunctionDef),
             ):
-                member = self._class_function_symbol(
-                    node=statement,
-                    container=qualified_name,
-                )
-                members[member.name] = member
+                accessor = self._property_accessor(statement)
+
+                if accessor not in {"setter", "deleter"}:
+                    member = self._class_function_symbol(
+                        node=statement,
+                        container=qualified_name,
+                    )
+                    members[member.name] = member
 
                 for instance_member in self._instance_members(
                     function=statement,
@@ -505,21 +663,40 @@ class _ModuleIndexer:
         tree: ast.Module,
     ) -> dict[str, tuple[LiteralValue, ...]]:
         assignments: dict[str, ast.expr] = {}
+        direct: set[int] = set()
+        pending = list(tree.body)
+        while pending:
+            statement = pending.pop()
+            direct.add(id(statement))
+            if isinstance(statement, (ast.With, ast.AsyncWith)):
+                pending.extend(statement.body)
+        ambiguous: set[str] = set()
 
-        for statement in tree.body:
+        def record(name: str, value: ast.expr, statement: ast.stmt) -> None:
+            if name in assignments or id(statement) not in direct:
+                ambiguous.add(name)
+            assignments[name] = value
+
+        for statement in _module_statements(tree.body):
             if isinstance(statement, ast.Assign):
                 for target in statement.targets:
                     if isinstance(target, ast.Name):
-                        assignments[target.id] = statement.value
+                        record(target.id, statement.value, statement)
             elif (
                 isinstance(statement, ast.AnnAssign)
                 and isinstance(statement.target, ast.Name)
                 and statement.value is not None
             ):
-                assignments[statement.target.id] = statement.value
+                record(statement.target.id, statement.value, statement)
+            elif isinstance(statement, ast.TypeAlias):
+                if not statement.type_params:
+                    record(statement.name.id, statement.value, statement)
 
         values: dict[str, tuple[LiteralValue, ...]] = {}
-        unresolved = dict(assignments)
+        unresolved = {
+            name: value for name, value in assignments.items()
+            if name not in ambiguous
+        }
 
         while unresolved:
             resolved_names: list[str] = []
@@ -1182,6 +1359,9 @@ class _ModuleIndexer:
 
     @staticmethod
     def _is_property_method(node: FunctionNode) -> bool:
+        if _ModuleIndexer._property_accessor(node) == "getter":
+            return True
+
         for decorator in node.decorator_list:
             name = _ModuleIndexer._qualified_expression(decorator)
 
@@ -1195,6 +1375,25 @@ class _ModuleIndexer:
                 return True
 
         return False
+
+    @staticmethod
+    def _property_accessor(node: FunctionNode) -> str | None:
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Attribute):
+                continue
+
+            if decorator.attr not in {"getter", "setter", "deleter"}:
+                continue
+
+            receiver = _ModuleIndexer._qualified_expression(decorator.value)
+
+            if (
+                receiver is not None
+                and receiver.rsplit(".", 1)[-1] == node.name
+            ):
+                return decorator.attr
+
+        return None
 
     def _infer_annotation(
         self,
@@ -1270,6 +1469,28 @@ class _ModuleIndexer:
             return f"{parent}[{arguments}]"
 
         return None
+
+
+def _module_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
+    """Visit module control-flow suites without entering local scopes."""
+    for statement in body:
+        yield statement
+        suites: list[list[ast.stmt]] = []
+
+        if isinstance(statement, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+            suites.extend((statement.body, statement.orelse))
+        elif isinstance(statement, (ast.With, ast.AsyncWith)):
+            suites.append(statement.body)
+        elif isinstance(statement, (ast.Try, ast.TryStar)):
+            suites.append(statement.body)
+            suites.extend(handler.body for handler in statement.handlers)
+            suites.extend((statement.orelse, statement.finalbody))
+        elif isinstance(statement, ast.Match):
+            suites.extend(case.body for case in statement.cases)
+
+        for suite in suites:
+            yield from _module_statements(suite)
+
 
 def _contains_literal(
     values: list[LiteralValue],

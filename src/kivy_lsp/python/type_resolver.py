@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from kivy_lsp.config import ServerConfig
 from kivy_lsp.model.symbol import (
@@ -15,6 +15,7 @@ from kivy_lsp.model.value_type import (
     ValueType,
     ValueTypeKind,
     literal_type,
+    union_type,
     value_type_from_annotation,
 )
 from kivy_lsp.python.index import PythonIndex
@@ -23,6 +24,7 @@ type ResolvedTypeCacheKey = tuple[
     str,
     str | None,
     str | None,
+    tuple[ResolvedTypeCacheKey, ...],
 ]
 
 
@@ -57,6 +59,50 @@ class ResolvedPythonType:
     @property
     def is_union(self) -> bool:
         return self.value_type.kind is ValueTypeKind.UNION
+
+
+def resolve_type_aliases(
+    index: PythonIndex,
+    value_type: ValueType,
+    module_name: str | None,
+    *,
+    visiting: frozenset[str] = frozenset(),
+) -> ValueType:
+    """Expand static aliases without treating variables as type targets."""
+    if value_type.arguments:
+        arguments = tuple(
+            resolve_type_aliases(
+                index, argument, module_name, visiting=visiting,
+            )
+            for argument in value_type.arguments
+        )
+        if value_type.kind is ValueTypeKind.UNION:
+            return union_type(*arguments)
+        value_type = replace(value_type, arguments=arguments)
+    if value_type.kind is not ValueTypeKind.OBJECT or not value_type.name:
+        return value_type
+
+    symbol = index.resolve_symbol(value_type.name, from_module=module_name)
+    if symbol is not None and symbol.is_type_alias:
+        if symbol.qualified_name in visiting or value_type.arguments:
+            return UNKNOWN_TYPE
+        return resolve_type_aliases(
+            index,
+            value_type_from_annotation(symbol.annotation),
+            index.module_name_for_symbol(symbol),
+            visiting=visiting | {symbol.qualified_name},
+        )
+    if symbol is not None and symbol.literal_values:
+        return literal_type(*symbol.literal_values)
+    if visiting:
+        # Alias targets belong to the declaration's module, not the caller.
+        class_symbol = index.resolve_class(
+            value_type.name, from_module=module_name,
+        )
+        if class_symbol is None:
+            return UNKNOWN_TYPE
+        return replace(value_type, name=class_symbol.qualified_name)
+    return value_type
 
 
 class PythonTypeResolver:
@@ -153,7 +199,10 @@ class PythonTypeResolver:
         """Return safe members exposed by a resolved value type."""
         self._ensure_current_revision()
         key = _resolved_type_cache_key(resolved_type)
-        cached = self._members_cache.get(key)
+        cache = (
+            self._members_cache if self._cacheable_type(resolved_type) else {}
+        )
+        cached = cache.get(key)
 
         if cached is not None:
             return cached
@@ -162,8 +211,40 @@ class PythonTypeResolver:
             resolved_type,
             set(),
         )
-        self._members_cache[key] = members
+        cache[key] = members
         return members
+
+    def has_complete_members(self, resolved_type: ResolvedPythonType) -> bool:
+        """Whether missing members can be diagnosed from the known bases."""
+        return self._has_complete_members(resolved_type, set())
+
+    def _has_complete_members(
+        self,
+        resolved_type: ResolvedPythonType,
+        visiting: set[ResolvedTypeCacheKey],
+    ) -> bool:
+        if resolved_type.is_union:
+            return all(
+                self._has_complete_members(argument, visiting)
+                for argument in resolved_type.arguments
+                if not argument.is_none
+            )
+        class_symbol = resolved_type.class_symbol
+        if class_symbol is None:
+            return False
+        if not self._python_index.has_complete_mro(class_symbol):
+            return False
+        key = _resolved_type_cache_key(resolved_type)
+        if key in visiting:
+            return False
+        projection = self.member_projection(resolved_type)
+        if projection is None:
+            return True
+        visiting.add(key)
+        try:
+            return self._has_complete_members(projection, visiting)
+        finally:
+            visiting.remove(key)
 
     def member_named(
         self,
@@ -214,9 +295,18 @@ class PythonTypeResolver:
             _resolved_type_cache_key(resolved_type),
             name,
         )
+        cache = (
+            self._member_type_cache
+            if self._cacheable_type(resolved_type) else {}
+        )
 
-        if key in self._member_type_cache:
-            return self._member_type_cache[key]
+        if key in cache:
+            return cache[key]
+
+        if resolved_type.is_union:
+            result = self._union_member_type(resolved_type, name, call=False)
+            cache[key] = result
+            return result
 
         member = self.member_named(
             resolved_type,
@@ -224,7 +314,7 @@ class PythonTypeResolver:
         )
 
         if member is None:
-            self._member_type_cache[key] = None
+            cache[key] = None
             return None
 
         member_type = self.type_of_symbol(member)
@@ -247,10 +337,10 @@ class PythonTypeResolver:
         )
 
         if descriptor_type is not None:
-            self._member_type_cache[key] = descriptor_type
+            cache[key] = descriptor_type
             return descriptor_type
 
-        self._member_type_cache[key] = member_type
+        cache[key] = member_type
         return member_type
 
     def member_return_type(
@@ -264,9 +354,18 @@ class PythonTypeResolver:
             _resolved_type_cache_key(resolved_type),
             name,
         )
+        cache = (
+            self._member_return_type_cache
+            if self._cacheable_type(resolved_type) else {}
+        )
 
-        if key in self._member_return_type_cache:
-            return self._member_return_type_cache[key]
+        if key in cache:
+            return cache[key]
+
+        if resolved_type.is_union:
+            result = self._union_member_type(resolved_type, name, call=True)
+            cache[key] = result
+            return result
 
         member = self.member_named(
             resolved_type,
@@ -274,7 +373,7 @@ class PythonTypeResolver:
         )
 
         if member is None:
-            self._member_return_type_cache[key] = None
+            cache[key] = None
             return None
 
         return_type = self.return_type_of_symbol(member)
@@ -285,15 +384,55 @@ class PythonTypeResolver:
         )
 
         if owner_type is None:
-            self._member_return_type_cache[key] = return_type
+            cache[key] = return_type
             return return_type
 
         resolved_return_type = self._substitute_type_parameters(
             return_type,
             self._type_parameter_bindings(owner_type),
         )
-        self._member_return_type_cache[key] = resolved_return_type
+        cache[key] = resolved_return_type
         return resolved_return_type
+
+    def _union_member_type(
+        self,
+        resolved_type: ResolvedPythonType,
+        name: str,
+        *,
+        call: bool,
+    ) -> ResolvedPythonType | None:
+        results: list[ResolvedPythonType] = []
+
+        for branch in resolved_type.arguments:
+            if branch.is_none:
+                continue
+
+            if call:
+                result = self.member_return_type(branch, name)
+            else:
+                result = self.member_type(branch, name)
+
+            if result is None:
+                return None
+
+            results.append(result)
+
+        return _resolved_union(results) if results else None
+
+    def _cacheable_type(self, resolved_type: ResolvedPythonType) -> bool:
+        """KV class changes need not change the Python index revision."""
+        symbol = resolved_type.class_symbol
+
+        if (
+            symbol is not None
+            and self._python_index.class_named(symbol.qualified_name)
+            is not symbol
+        ):
+            return False
+
+        return all(
+            self._cacheable_type(arg) for arg in resolved_type.arguments
+        )
 
     def _ensure_current_revision(self) -> None:
         revision = self._python_index.revision
@@ -383,6 +522,9 @@ class PythonTypeResolver:
         value_type: ValueType,
         from_module: str | None,
     ) -> ResolvedPythonType:
+        value_type = resolve_type_aliases(
+            self._python_index, value_type, from_module,
+        )
         arguments = tuple(
             self._resolve_value_type(
                 argument,
@@ -390,6 +532,12 @@ class PythonTypeResolver:
             )
             for argument in value_type.arguments
         )
+        if value_type.kind is ValueTypeKind.UNION:
+            resolved_union = union_type(*(
+                argument.value_type for argument in arguments
+            ))
+            if resolved_union != value_type:
+                return self._resolve_value_type(resolved_union, from_module)
         class_symbol = None
         source_module = from_module
 
@@ -409,44 +557,11 @@ class PythonTypeResolver:
 
                 if class_module is not None:
                     source_module = class_module.name
-            else:
-                literal_alias = self._literal_alias_type(
-                    value_type.name,
-                    from_module,
-                )
-
-                if literal_alias is not None:
-                    return literal_alias
-
         return ResolvedPythonType(
             value_type=value_type,
             source_module=source_module,
             class_symbol=class_symbol,
             arguments=arguments,
-        )
-
-    def _literal_alias_type(
-        self,
-        reference: str,
-        from_module: str | None,
-    ) -> ResolvedPythonType | None:
-        symbol = self._python_index.resolve_symbol(
-            reference,
-            from_module=from_module,
-        )
-
-        if symbol is None or not symbol.literal_values:
-            return None
-
-        source_module = self.module_name_for_symbol(
-            symbol,
-        )
-
-        return self._resolve_value_type(
-            literal_type(
-                *symbol.literal_values,
-            ),
-            source_module,
         )
 
     def _members_of(
@@ -589,11 +704,27 @@ class PythonTypeResolver:
         )
         base_types: list[ResolvedPythonType] = []
 
-        for base_reference in class_symbol.bases:
+        for index, base_reference in enumerate(class_symbol.bases):
             base_type = self.resolve_annotation(
                 base_reference,
                 from_module=module_name,
             )
+
+            if class_symbol.resolved_bases:
+                base_symbol = class_symbol.resolved_bases[index]
+                base_module = (
+                    self._python_index.module_for_class(base_symbol)
+                    if base_symbol is not None else None
+                )
+                base_type = replace(
+                    base_type,
+                    class_symbol=base_symbol,
+                    source_module=(
+                        base_module.name if base_module is not None
+                        else module_name
+                    ),
+                )
+
             base_type = self._substitute_type_parameters(
                 base_type,
                 bindings,
@@ -846,6 +977,47 @@ def _resolved_type_cache_key(
         resolved_type.value_type.display,
         resolved_type.source_module,
         class_name,
+        tuple(
+            _resolved_type_cache_key(arg) for arg in resolved_type.arguments
+        ),
+    )
+
+
+def _resolved_union(types: list[ResolvedPythonType]) -> ResolvedPythonType:
+    """Combine branch results without losing their resolved source modules."""
+    branches: list[ResolvedPythonType] = []
+    seen: set[ResolvedTypeCacheKey] = set()
+    pending = list(reversed(types))
+
+    while pending:
+        current = pending.pop()
+
+        if current.is_any:
+            return current
+
+        if current.is_union:
+            pending.extend(reversed(current.arguments))
+            continue
+
+        key = _resolved_type_cache_key(current)
+
+        if current.value_type.kind is not ValueTypeKind.OBJECT:
+            key = (key[0], None, key[2], key[3])
+
+        if key not in seen:
+            seen.add(key)
+            branches.append(current)
+
+    if len(branches) == 1:
+        return branches[0]
+
+    return ResolvedPythonType(
+        value_type=ValueType(
+            kind=ValueTypeKind.UNION,
+            arguments=tuple(branch.value_type for branch in branches),
+        ),
+        source_module=None,
+        arguments=tuple(branches),
     )
 
 
@@ -884,4 +1056,3 @@ def _deduplicate_symbols(
         unique.setdefault(key, symbol)
 
     return tuple(unique.values())
-

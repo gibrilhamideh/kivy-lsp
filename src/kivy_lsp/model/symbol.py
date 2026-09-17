@@ -87,6 +87,7 @@ class Symbol:
     return_annotation: str | None = None
     property_info: KivyPropertyInfo | None = None
     literal_values: tuple[LiteralValue, ...] = ()
+    is_type_alias: bool = False
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -123,6 +124,7 @@ class ClassSymbol:
     symbol: Symbol
     bases: tuple[str, ...]
     members: tuple[Symbol, ...]
+    resolved_bases: tuple[ClassSymbol | None, ...] = ()
 
     def __post_init__(self) -> None:
         if self.symbol.kind is not SymbolKind.CLASS:

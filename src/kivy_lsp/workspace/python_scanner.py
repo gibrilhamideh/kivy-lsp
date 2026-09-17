@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import os
 import tokenize
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from pathlib import Path
 
 from kivy_lsp.config import ServerConfig
 from kivy_lsp.model.diagnostic import Diagnostic
 from kivy_lsp.python.index import PythonIndex
 from kivy_lsp.python.indexer import index_python_module
+from kivy_lsp.workspace.discovery import discover_files
 from kivy_lsp.workspace.document import TextDocument
 
 
@@ -102,6 +101,11 @@ class PythonScanner:
             errors=tuple(errors),
         )
 
+    def module_paths(self) -> dict[str, Path]:
+        """Return the selected source for each module, preferring stubs."""
+        paths, _ = self._discover_files()
+        return self._select_modules(paths)
+
     def _discover_files(
         self,
     ) -> tuple[list[Path], list[PythonScanError]]:
@@ -130,7 +134,7 @@ class PythonScanner:
                 )
                 continue
 
-            for path in self._walk_source_root(root):
+            for path in self._walk_source_root(root, errors):
                 resolved = path.resolve()
 
                 if resolved in seen:
@@ -145,30 +149,16 @@ class PythonScanner:
     def _walk_source_root(
         self,
         root: Path,
+        errors: list[PythonScanError],
     ) -> list[Path]:
-        files: list[Path] = []
-
-        for directory, directory_names, filenames in os.walk(str(root)):
-            current = Path(directory)
-
-            directory_names[:] = [
-                name
-                for name in sorted(directory_names)
-                if not self._is_excluded(current / name, root)
-            ]
-
-            for filename in sorted(filenames):
-                path = current / filename
-
-                if path.suffix not in {".py", ".pyi"}:
-                    continue
-
-                if self._is_excluded(path, root):
-                    continue
-
-                files.append(path)
-
-        return files
+        return list(
+            discover_files(
+                (root,), {".py", ".pyi"}, self._config.excludes,
+                on_error=lambda path, message: errors.append(
+                    PythonScanError(path, message)
+                ),
+            )
+        )
 
     def _select_modules(
         self,
@@ -192,38 +182,6 @@ class PythonScanner:
                 selected[module_name] = path
 
         return selected
-
-    def _is_excluded(
-        self,
-        path: Path,
-        root: Path,
-    ) -> bool:
-        try:
-            relative = path.relative_to(root)
-        except ValueError:
-            return True
-
-        relative_text = relative.as_posix()
-
-        for pattern in self._config.excludes:
-            normalized = pattern.replace("\\", "/").strip("/")
-
-            if not normalized:
-                continue
-
-            if "/" not in normalized and any(
-                fnmatchcase(part, normalized)
-                for part in relative.parts
-            ):
-                return True
-
-            if fnmatchcase(relative_text, normalized):
-                return True
-
-            if fnmatchcase(f"{relative_text}/", normalized):
-                return True
-
-        return False
 
     @staticmethod
     def _read_source(path: Path) -> str:

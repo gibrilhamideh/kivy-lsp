@@ -47,11 +47,13 @@ class KivyPropertyInfo:
     item_type: ValueType = UNKNOWN_TYPE
     options: tuple[LiteralValue, ...] = ()
     options_reference: str | None = None
+    options_complete: bool = False
     allow_none: bool = False
     minimum: float | None = None
     maximum: float | None = None
     sequence_min_length: int | None = None
     sequence_max_length: int | None = None
+    sequence_allowed_lengths: tuple[int, ...] = ()
     accepts_numeric_units: bool = False
 
     def __post_init__(self) -> None:
@@ -106,6 +108,7 @@ class KivyPropertyInfo:
         return (
             self.sequence_min_length is not None
             or self.sequence_max_length is not None
+            or bool(self.sequence_allowed_lengths)
         )
 
     @property
@@ -213,9 +216,13 @@ def default_property_info(
             if kind is KivyPropertyKind.COLOR
             else None
         ),
+        sequence_allowed_lengths=(
+            (1, 2, 4) if kind is KivyPropertyKind.VARIABLE_LIST else ()
+        ),
         accepts_numeric_units=kind in {
             KivyPropertyKind.NUMERIC,
             KivyPropertyKind.BOUNDED_NUMERIC,
+            KivyPropertyKind.VARIABLE_LIST,
         },
     )
 
@@ -226,3 +233,40 @@ def property_info_from_class_name(
     """Create baseline metadata from a Property class name."""
     kind = property_kind_from_class_name(class_name)
     return default_property_info(kind)
+
+
+def property_assignment_type(
+    kind: KivyPropertyKind,
+    annotation: ValueType,
+) -> ValueType:
+    """Keep descriptor conversions separate from their read types."""
+    if annotation.kind is ValueTypeKind.UNION:
+        return union_type(*(
+            property_assignment_type(kind, member)
+            for member in annotation.arguments
+        ))
+
+    if kind in {
+        KivyPropertyKind.LIST,
+        KivyPropertyKind.VARIABLE_LIST,
+        KivyPropertyKind.REFERENCE_LIST,
+        KivyPropertyKind.COLOR,
+    } and annotation.kind in {
+        ValueTypeKind.LIST,
+        ValueTypeKind.TUPLE,
+        ValueTypeKind.SEQUENCE,
+    }:
+        return default_property_info(kind).accepted_type
+
+    if kind in {
+        KivyPropertyKind.NUMERIC,
+        KivyPropertyKind.BOUNDED_NUMERIC,
+    } and annotation.kind in {
+        ValueTypeKind.INT,
+        ValueTypeKind.FLOAT,
+        ValueTypeKind.NUMBER,
+    }:
+        return default_property_info(kind).accepted_type
+
+    # Literal annotations remain explicit finite value constraints.
+    return annotation

@@ -174,7 +174,8 @@ class _Lexer:
         if self._offset > start:
             self._emit(TokenKind.WHITESPACE, start, self._offset)
 
-        indentation = self._offset - start
+        prefix = self._source[start:self._offset]
+        indentation = len(prefix.replace("\t", "    "))
         suppress = bool(self._delimiters) or self._continued_line
         self._continued_line = False
         self._at_line_start = False
@@ -225,7 +226,9 @@ class _Lexer:
             self._scan_string()
         elif self._is_identifier_start(character):
             self._scan_identifier()
-        elif character.isdigit() or character == "." and self._peek().isdigit():
+        elif character.isdigit() or (
+            character == "." and self._peek().isdigit()
+        ):
             self._scan_number()
         elif self._scan_operator():
             self._line_has_code = True

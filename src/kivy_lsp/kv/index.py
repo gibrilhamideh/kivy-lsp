@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from kivy_lsp.kv.nodes import PropertyNode
 from kivy_lsp.model.span import Span
 
 
@@ -44,6 +45,7 @@ class KvClassSymbol:
     bases: tuple[str, ...] = ()
     is_dynamic: bool = False
     ids: tuple[KvIdSymbol, ...] = ()
+    properties: tuple[PropertyNode, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -256,4 +258,3 @@ class KvIndex:
             len(symbols)
             for symbols in self._by_uri.values()
         )
-

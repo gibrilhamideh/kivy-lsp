@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from kivy_lsp.config import _DEFAULT_EXCLUDES
 from kivy_lsp.kv.index import (
     KvClassSymbol,
     KvIdSymbol,
@@ -17,19 +18,9 @@ from kivy_lsp.kv.nodes import (
     RuleNode,
     WidgetNode,
 )
-from kivy_lsp.kv.parser import parse
+from kivy_lsp.kv.parser import ParseResult, parse
 from kivy_lsp.model.span import Span
-
-_IGNORED_DIRECTORIES = {
-    ".git",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".venv",
-    "__pycache__",
-    "build",
-    "dist",
-}
+from kivy_lsp.workspace.discovery import discover_files
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,12 +36,11 @@ class KvScanner:
     def __init__(
         self,
         roots: Iterable[Path],
+        excludes: Iterable[str] = _DEFAULT_EXCLUDES,
     ) -> None:
+        self._excludes = tuple(excludes)
         self._roots = tuple(
-            dict.fromkeys(
-                root.resolve()
-                for root in roots
-            ),
+            dict.fromkeys(root.resolve() for root in roots),
         )
 
     def scan(self) -> KvIndex:
@@ -66,33 +56,12 @@ class KvScanner:
 
         return index
 
-    def paths(self) -> tuple[Path, ...]:
+    def paths(
+        self, *, on_error: Callable[[Path, str], None] | None = None
+    ) -> tuple[Path, ...]:
         """Return every KV file beneath the configured roots."""
-        paths: set[Path] = set()
-
-        for root in self._roots:
-            if root.is_file():
-                if root.suffix == ".kv":
-                    paths.add(root)
-
-                continue
-
-            if not root.is_dir():
-                continue
-
-            for path in root.rglob("*.kv"):
-                resolved = path.resolve()
-
-                if self._is_ignored(resolved):
-                    continue
-
-                paths.add(resolved)
-
-        return tuple(
-            sorted(
-                paths,
-                key=lambda path: path.as_posix(),
-            ),
+        return discover_files(
+            self._roots, {".kv"}, self._excludes, on_error=on_error
         )
 
     def scan_path(
@@ -118,8 +87,15 @@ class KvScanner:
         source: str,
     ) -> tuple[KvClassSymbol, ...]:
         """Extract KV classes and ids from in-memory source."""
+        return self.scan_result(uri, parse(source))
+
+    def scan_result(
+        self,
+        uri: str,
+        parse_result: ParseResult,
+    ) -> tuple[KvClassSymbol, ...]:
+        """Extract symbols from the workspace's existing parse result."""
         symbols: list[KvClassSymbol] = []
-        parse_result = parse(source)
 
         for item in parse_result.document.items:
             if not isinstance(item, RuleNode):
@@ -128,6 +104,8 @@ class KvScanner:
             candidates = _collect_id_candidates(item.body)
 
             for selector in item.selectors:
+                if selector.is_class_selector:
+                    continue
                 name = selector.name.text
 
                 if not name.isidentifier():
@@ -146,10 +124,7 @@ class KvScanner:
                 ids = tuple(
                     KvIdSymbol(
                         name=candidate.name,
-                        widget_class=(
-                            candidate.widget_class
-                            or name
-                        ),
+                        widget_class=(candidate.widget_class or name),
                         uri=uri,
                         span=candidate.span,
                     )
@@ -163,19 +138,15 @@ class KvScanner:
                         bases=bases,
                         is_dynamic=is_dynamic,
                         ids=ids,
+                        properties=tuple(
+                            node
+                            for node in item.body
+                            if isinstance(node, PropertyNode)
+                        ),
                     )
                 )
 
         return tuple(symbols)
-
-    def _is_ignored(
-        self,
-        path: Path,
-    ) -> bool:
-        return any(
-            part in _IGNORED_DIRECTORIES
-            for part in path.parts
-        )
 
 
 def _collect_id_candidates(

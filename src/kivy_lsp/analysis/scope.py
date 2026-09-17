@@ -32,6 +32,7 @@ class KvValue:
     symbol: Symbol | None = None
     module_name: str | None = None
     local_members: tuple[Symbol, ...] = ()
+    call_result: KvValue | None = None
 
     @classmethod
     def unknown(
@@ -125,6 +126,7 @@ class KvValue:
             symbol=self.symbol,
             module_name=self.module_name,
             local_members=members,
+            call_result=self.call_result,
         )
 
 

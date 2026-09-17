@@ -25,11 +25,14 @@ class KvPropertyDiagnosticAnalyzer:
     def __init__(
         self,
         python_index: PythonIndex,
+        *,
+        strict: bool = False,
     ) -> None:
         self._property_resolver = KivyPropertyResolver(
             python_index,
         )
         self._type_checker = KivyPropertyTypeChecker()
+        self._strict = strict
 
     def analyze(
         self,
@@ -63,6 +66,9 @@ class KvPropertyDiagnosticAnalyzer:
             TypeCompatibility.COMPATIBLE,
             TypeCompatibility.UNKNOWN,
         }:
+            return ()
+
+        if result.is_possible and not self._strict:
             return ()
 
         if result.compatibility is TypeCompatibility.INCOMPATIBLE:

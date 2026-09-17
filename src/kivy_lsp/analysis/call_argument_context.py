@@ -53,6 +53,39 @@ class _DelimiterFrame:
     call: _CallFrame | None = None
 
 
+def signature_call_context_at(
+    document: TextDocument,
+    expression_start: int,
+    offset: int,
+) -> KvCallArgumentContext | None:
+    """Find the innermost open call, including partially typed arguments."""
+    if not 0 <= expression_start <= offset <= len(document.text):
+        return None
+
+    source = document.text[expression_start:offset]
+    call = next(
+        (
+            frame.call
+            for frame in reversed(_open_delimiters(source))
+            if frame.call is not None
+        ),
+        None,
+    )
+
+    if call is None:
+        return None
+
+    argument = source[call.argument_start :].replace("\\\n", " ")
+    keyword = re.match(r"\s*([A-Za-z_]\w*)\s*=(?!=)", argument)
+    return KvCallArgumentContext(
+        callee=call.callee,
+        argument_index=call.argument_index,
+        keyword_name=keyword.group(1) if keyword else None,
+        prefix="",
+        replacement_span=Span.empty(offset),
+    )
+
+
 def call_argument_context_at(
     document: TextDocument,
     target: KvCompletionTarget,
@@ -70,32 +103,23 @@ def call_argument_context_at(
     if cursor > len(document.text):
         return None
 
-    expression_prefix = document.text[
-        expression_start:cursor
-    ]
+    expression_prefix = document.text[expression_start:cursor]
     frames = _open_delimiters(expression_prefix)
     active_call = next(
-        (
-            frame.call
-            for frame in reversed(frames)
-            if frame.call is not None
-        ),
+        (frame.call for frame in reversed(frames) if frame.call is not None),
         None,
     )
 
     if active_call is None:
         return None
 
-    relative_target_start = (
-        target.replacement_span.start
-        - expression_start
-    )
+    relative_target_start = target.replacement_span.start - expression_start
 
     if relative_target_start < active_call.argument_start:
         return None
 
     argument_prefix = expression_prefix[
-        active_call.argument_start:relative_target_start
+        active_call.argument_start : relative_target_start
     ]
     keyword_name = _keyword_name(argument_prefix)
     quote = _quote_before_target(
@@ -172,11 +196,7 @@ def _open_delimiters(
                 "\n",
                 offset,
             )
-            offset = (
-                len(source)
-                if newline < 0
-                else newline + 1
-            )
+            offset = len(source) if newline < 0 else newline + 1
             continue
 
         if character in {"(", "[", "{"}:
@@ -267,11 +287,7 @@ def _can_start_expression(
 ) -> bool:
     character = source[offset]
 
-    if not (
-        character == "_"
-        or character.isalpha()
-        or character == "("
-    ):
+    if not (character == "_" or character.isalpha() or character == "("):
         return False
 
     if offset == 0:
@@ -280,10 +296,7 @@ def _can_start_expression(
     previous = source[offset - 1]
 
     if character == "_" or character.isalnum():
-        return not (
-            previous == "_"
-            or previous.isalnum()
-        )
+        return not (previous == "_" or previous.isalnum())
 
     return True
 

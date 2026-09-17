@@ -21,6 +21,7 @@ class KvCompletionTargetKind(StrEnum):
     WIDGET = "widget"
     PROPERTY = "property"
     STRUCTURE = "structure"
+    IMPORT = "import"
 
 
 @dataclass(frozen=True, slots=True)

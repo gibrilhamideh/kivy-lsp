@@ -5,13 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from kivy_lsp.analysis.scope import KvValue
-from kivy_lsp.model.property import KivyPropertyInfo
+from kivy_lsp.model.property import (
+    KivyPropertyInfo, property_assignment_type,
+)
 from kivy_lsp.model.symbol import (
     ClassSymbol,
     Symbol,
     SymbolKind,
 )
 from kivy_lsp.python.index import PythonIndex
+from kivy_lsp.python.type_resolver import resolve_type_aliases
+from kivy_lsp.model.value_type import ValueType
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +62,7 @@ class KivyPropertyResolver:
         return ResolvedKivyProperty(
             owner=class_symbol,
             symbol=symbol,
-            info=self._resolved_info(symbol),
+            info=self.info_for_symbol(symbol),
         )
 
     def class_for_value(
@@ -115,7 +119,7 @@ class KivyPropertyResolver:
                 ResolvedKivyProperty(
                     owner=class_symbol,
                     symbol=symbol,
-                    info=self._resolved_info(symbol),
+                    info=self.info_for_symbol(symbol),
                 )
             )
 
@@ -137,22 +141,25 @@ class KivyPropertyResolver:
 
         return None
 
-    def _resolved_info(
+    def info_for_symbol(
         self,
         symbol: Symbol,
     ) -> KivyPropertyInfo | None:
         info = symbol.property_info
+        if info is None:
+            return None
+        module_name = self._python_index.module_name_for_symbol(symbol)
+        accepted = resolve_literal_aliases(
+            self._python_index, info.accepted_type, module_name,
+        )
+        info = replace(
+            info,
+            accepted_type=property_assignment_type(info.kind, accepted),
+        )
 
-        if (
-            info is None
-            or info.options
-            or info.options_reference is None
-        ):
+        if info.options or info.options_reference is None:
             return info
 
-        module_name = self._python_index.module_name_for_symbol(
-            symbol,
-        )
         options_symbol = self._python_index.resolve_symbol(
             info.options_reference,
             from_module=module_name,
@@ -167,4 +174,14 @@ class KivyPropertyResolver:
         return replace(
             info,
             options=options_symbol.literal_values,
+            options_complete=True,
         )
+
+
+def resolve_literal_aliases(
+    index: PythonIndex,
+    value_type: ValueType,
+    module_name: str | None,
+) -> ValueType:
+    """Resolve named literal aliases, preserving unbounded union arms."""
+    return resolve_type_aliases(index, value_type, module_name)

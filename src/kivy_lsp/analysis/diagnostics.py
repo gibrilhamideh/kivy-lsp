@@ -12,8 +12,15 @@ from kivy_lsp.analysis.property_diagnostics import (
     KvPropertyDiagnosticAnalyzer,
 )
 from kivy_lsp.analysis.scope import KvSemanticModel
-from kivy_lsp.analysis.value_inference import KvValueInferer
+from kivy_lsp.analysis.value_constraints import ValueConstraintResolver
+from kivy_lsp.analysis.value_inference import (
+    KvInferredValue,
+    KvTypeConfidence,
+    KvValueInferer,
+)
 from kivy_lsp.config import ServerConfig
+from kivy_lsp.kv.index import KvIndex
+from kivy_lsp.kv.expression_source import EmbeddedPythonSource
 from kivy_lsp.kv.nodes import (
     BodyNode,
     DocumentNode,
@@ -24,6 +31,7 @@ from kivy_lsp.kv.nodes import (
 from kivy_lsp.kv.parser import ParseResult
 from kivy_lsp.model.diagnostic import Diagnostic
 from kivy_lsp.model.span import Span
+from kivy_lsp.model.value_type import literal_type
 from kivy_lsp.python.index import PythonIndex
 from kivy_lsp.workspace.document import PositionEncoding, TextDocument
 
@@ -49,19 +57,26 @@ class KvDiagnosticAnalyzer:
         self,
         python_index: PythonIndex,
         config: ServerConfig | None = None,
+        kv_index: KvIndex | None = None,
     ) -> None:
         self._resolver = KvExpressionResolver(
             python_index,
             config,
+            kv_index,
+        )
+        self._constraints = ValueConstraintResolver(
+            python_index, self._resolver,
         )
         self._expression_analyzer = (
             KvExpressionDiagnosticAnalyzer(
                 self._resolver,
+                constraints=self._constraints,
             )
         )
         self._property_analyzer = (
             KvPropertyDiagnosticAnalyzer(
                 python_index,
+                strict=config.diagnostics.strict if config else False,
             )
         )
         self._value_inferer = KvValueInferer(
@@ -321,6 +336,13 @@ class KvDiagnosticAnalyzer:
             scope,
             self_value=self_value,
         )
+        values = self._constraints.for_expression(
+            source, scope, self_value=self_value,
+        )
+        if values and not inferred_value.literal_known:
+            inferred_value = KvInferredValue.typed(
+                literal_type(*values), KvTypeConfidence.CERTAIN,
+            )
         sequence_length = _literal_sequence_length(source)
 
         diagnostics.extend(
@@ -337,6 +359,9 @@ class KvDiagnosticAnalyzer:
 def _literal_sequence_length(
     source: str,
 ) -> int | None:
+    source = EmbeddedPythonSource.from_source(
+        source, Span(0, len(source)),
+    ).text
     try:
         tree = ast.parse(
             source,
@@ -354,9 +379,25 @@ def _literal_sequence_length(
             ast.Tuple,
         ),
     ):
-        return len(expression.elts)
+        return _sequence_length(expression)
 
     return None
+
+
+def _sequence_length(expression: ast.expr) -> int | None:
+    if not isinstance(expression, (ast.List, ast.Tuple)):
+        return None
+
+    length = 0
+    for item in expression.elts:
+        if isinstance(item, ast.Starred):
+            expanded = _sequence_length(item.value)
+            if expanded is None:
+                return None
+            length += expanded
+        else:
+            length += 1
+    return length
 
 
 def _statement_indent(

@@ -12,7 +12,10 @@ from kivy_lsp.analysis.scope import (
     KvValue,
     KvValueKind,
 )
+from kivy_lsp.analysis.static_values import annotation_references
 from kivy_lsp.config import ServerConfig
+from kivy_lsp.analysis.widget_resolution import resolve_widget_class
+from kivy_lsp.kv.index import KvIndex
 from kivy_lsp.kv.nodes import WidgetNode
 from kivy_lsp.model.symbol import (
     ClassSymbol,
@@ -20,6 +23,7 @@ from kivy_lsp.model.symbol import (
     Symbol,
     SymbolKind,
 )
+from kivy_lsp.model.value_type import object_type
 from kivy_lsp.python.index import PythonIndex
 from kivy_lsp.python.type_resolver import (
     PythonTypeResolver,
@@ -75,8 +79,10 @@ class KvExpressionResolver:
         self,
         python_index: PythonIndex,
         config: ServerConfig | None = None,
+        kv_index: KvIndex | None = None,
     ) -> None:
         self._python_index = python_index
+        self._kv_index = kv_index
         self._type_resolver = (
             PythonTypeResolver(
                 python_index,
@@ -163,6 +169,26 @@ class KvExpressionResolver:
             )
 
         return local_members
+
+    def has_complete_members(self, resolution: KvExpressionResolution) -> bool:
+        """Whether the owner exposes enough metadata to reject a member."""
+        value = resolution.value
+        if value is None:
+            return False
+        resolved_type = self._resolved_type_for_value(value)
+        if (
+            resolved_type is not None
+            and self._type_resolver is not None
+            and (
+                resolved_type.class_symbol is not None
+                or resolved_type.is_union
+                or value.class_symbol is None
+            )
+        ):
+            return self._type_resolver.has_complete_members(resolved_type)
+        if value.class_symbol is not None:
+            return self._python_index.has_complete_mro(value.class_symbol)
+        return value.module_name is not None
 
     def member_definitions(
         self,
@@ -535,12 +561,21 @@ class KvExpressionResolver:
             )
 
             if member is not None:
-                if member.kind in {
-                    SymbolKind.CLASS,
-                    SymbolKind.FUNCTION,
-                    SymbolKind.METHOD,
-                }:
+                if member.kind is SymbolKind.CLASS:
                     return self._symbol_value(member)
+                if member.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD}:
+                    return_type = self._type_resolver.member_return_type(
+                        resolved_type, member_name,
+                    )
+                    return KvValue(
+                        kind=KvValueKind.FUNCTION,
+                        type_name=member.return_annotation,
+                        symbol=member,
+                        call_result=(
+                            self._value_from_resolved_type(return_type)
+                            if return_type is not None else None
+                        ),
+                    )
 
                 member_type = self._type_resolver.member_type(
                     resolved_type,
@@ -637,6 +672,8 @@ class KvExpressionResolver:
         self,
         value: KvValue,
     ) -> KvValue | None:
+        if value.call_result is not None:
+            return value.call_result
         if (
             value.kind is KvValueKind.CLASS
             and value.class_symbol is not None
@@ -695,6 +732,18 @@ class KvExpressionResolver:
 
         if value.kind is KvValueKind.FUNCTION:
             return None
+
+        if (
+            value.class_symbol is not None
+            and self._python_index.class_named(
+                value.class_symbol.qualified_name,
+            ) is not value.class_symbol
+        ):
+            return ResolvedPythonType(
+                value_type=object_type(value.class_symbol.qualified_name),
+                source_module=None,
+                class_symbol=value.class_symbol,
+            )
 
         source_module = None
 
@@ -759,7 +808,7 @@ class KvExpressionResolver:
 
         module_name = self._module_name_for_symbol(symbol)
 
-        for reference in _annotation_references(annotation):
+        for reference in annotation_references(annotation):
             class_symbol = self._python_index.resolve_class(
                 reference,
                 from_module=module_name,
@@ -815,17 +864,7 @@ class KvExpressionResolver:
         self,
         name: str,
     ) -> ClassSymbol | None:
-        class_symbol = self._python_index.resolve_class(name)
-
-        if class_symbol is not None:
-            return class_symbol
-
-        matches = self._python_index.classes_named(name)
-
-        if len(matches) == 1:
-            return matches[0]
-
-        return None
+        return resolve_widget_class(name, self._python_index, self._kv_index)
 
     def _resolve_dotted_fallback(
         self,
@@ -912,25 +951,6 @@ def _same_value_type(
     )
 
 
-def _annotation_references(annotation: str) -> tuple[str, ...]:
-    annotation = annotation.strip().strip("'\"")
-
-    if annotation.startswith("Optional[") and annotation.endswith("]"):
-        annotation = annotation[9:-1]
-
-    references: list[str] = []
-
-    for part in annotation.split("|"):
-        reference = part.strip()
-
-        if reference in {"", "None", "NoneType"}:
-            continue
-
-        references.append(reference)
-
-    return tuple(references)
-
-
 def _merge_members(
     primary: tuple[Symbol, ...],
     secondary: tuple[Symbol, ...],
@@ -979,4 +999,3 @@ def _widget_name(
         return None
 
     return name
-

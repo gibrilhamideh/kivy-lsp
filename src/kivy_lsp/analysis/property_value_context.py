@@ -52,6 +52,12 @@ def property_value_context_at(
     if target.kind is not KvCompletionTargetKind.NAME:
         return None
 
+    expression_prefix = document.text[
+        expression_start:target.replacement_span.start
+    ].replace("\\\r\n", "").replace("\\\n", "")
+    if re.fullmatch(r"[\s(]*['\"]?", expression_prefix) is None:
+        return None
+
     property_name = _property_name_at_target(
         document.text,
         target.replacement_span.start,

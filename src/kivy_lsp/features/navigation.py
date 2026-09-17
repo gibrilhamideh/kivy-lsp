@@ -11,6 +11,7 @@ from kivy_lsp.analysis.definition import (
     KvDefinitionEngine,
     PythonIdsDefinitionEngine,
 )
+from kivy_lsp.analysis.editor_features import KvEditorFeatures
 from kivy_lsp.analysis.i18n import translation_key_target_at
 from kivy_lsp.model.span import Span
 from kivy_lsp.model.symbol import SymbolLocation
@@ -27,7 +28,7 @@ def register_navigation(
     server: LanguageServer,
     workspace_provider: WorkspaceProvider,
 ) -> None:
-    """Register go-to-definition and translation hover support."""
+    """Register go-to-definition and semantic/translation hover support."""
 
     def definition(
         params: types.DefinitionParams,
@@ -56,6 +57,21 @@ def register_navigation(
                 workspace.kv_index,
             ).definition_at(document, offset)
         elif suffix == ".kv":
+            includes = workspace.include_locations(uri, offset)
+            if includes:
+                return [
+                    types.Location(
+                        uri=target_uri,
+                        range=_to_lsp_range(target_document, span),
+                    )
+                    for target_uri, span in includes
+                    if (
+                        target_document := workspace.source_document(
+                            target_uri,
+                        )
+                    )
+                    is not None
+                ] or None
             parse_result = workspace.kv_result(uri)
             semantic_model = workspace.semantic_model(uri)
 
@@ -90,72 +106,65 @@ def register_navigation(
 
         return result or None
 
-    def hover(
-        params: types.HoverParams,
-    ) -> types.Hover | None:
+    def hover(params: types.HoverParams) -> types.Hover | None:
         workspace = workspace_provider()
-
         if workspace is None:
             return None
-
         uri = params.text_document.uri
-
         if _uri_suffix(uri) != ".kv":
             return None
-
         document = workspace.document(uri)
         parse_result = workspace.kv_result(uri)
-        config = workspace.config.i18n
-
-        if (
-            document is None
-            or parse_result is None
-            or config is None
-        ):
+        if document is None or parse_result is None:
             return None
-
         offset = _request_offset(document, params.position)
-
         if offset is None:
             return None
-
-        target = translation_key_target_at(
-            document,
-            parse_result,
-            offset,
-            config,
-            workspace.translation_index,
-        )
-
-        if target is None or target.entry is None:
-            return None
-
-        entry = target.entry
-        parameters = entry.placeholder_names
-        lines = [
-            f"**{entry.key}**",
-            "",
-            entry.value,
-        ]
-
-        if parameters:
-            lines.extend(
-                (
-                    "",
-                    "Parameters: "
-                    + ", ".join(
-                        f"`{name}`"
-                        for name in parameters
-                    ),
-                )
+        config = workspace.config.i18n
+        if config is not None:
+            target = translation_key_target_at(
+                document,
+                parse_result,
+                offset,
+                config,
+                workspace.translation_index,
             )
-
+            if target is not None and target.entry is not None:
+                entry = target.entry
+                lines = [f"**{entry.key}**", "", entry.value]
+                if entry.placeholder_names:
+                    lines.extend(
+                        (
+                            "",
+                            "Parameters: "
+                            + ", ".join(
+                                f"`{name}`" for name in entry.placeholder_names
+                            ),
+                        )
+                    )
+                return types.Hover(
+                    contents=types.MarkupContent(
+                        kind=types.MarkupKind.Markdown,
+                        value="\n".join(lines),
+                    ),
+                    range=_to_lsp_range(document, target.span),
+                )
+        model = workspace.semantic_model(uri)
+        if model is None:
+            return None
+        result = KvEditorFeatures(
+            workspace.python_index,
+            workspace.kv_index,
+            workspace.config,
+        ).hover(document, parse_result, model, offset)
+        if result is None:
+            return None
         return types.Hover(
             contents=types.MarkupContent(
                 kind=types.MarkupKind.Markdown,
-                value="\n".join(lines),
+                value=result.markdown,
             ),
-            range=_to_lsp_range(document, target.span),
+            range=_to_lsp_range(document, result.span),
         )
 
     register_definition = server.feature(
@@ -222,4 +231,3 @@ def _to_lsp_range(
 def _uri_suffix(uri: str) -> str:
     path = urlparse(uri).path
     return PurePosixPath(path).suffix.lower()
-

@@ -14,9 +14,16 @@ from kivy_lsp.analysis.scope import (
     KvValue,
     KvWidgetValue,
 )
+from kivy_lsp.analysis.static_values import (
+    annotation_references,
+    expression_annotation,
+)
+from kivy_lsp.analysis.widget_resolution import resolve_widget_class
+from kivy_lsp.kv.index import KvClassSymbol, KvIndex
 from kivy_lsp.config import GlobalImport, ServerConfig
 from kivy_lsp.kv.nodes import (
     BodyNode,
+    DirectiveNode,
     PropertyNode,
     RuleNode,
     WidgetNode,
@@ -38,12 +45,6 @@ from kivy_lsp.workspace.document import TextDocument
 
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-_IMPORT_DIRECTIVE_PATTERN = re.compile(
-    r"^\s*#:\s*import\s+"
-    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s+"
-    r"(?P<target>[A-Za-z_][A-Za-z0-9_.]*)\s*$",
-    re.MULTILINE,
-)
 
 
 def build_kv_semantic_model(
@@ -51,10 +52,12 @@ def build_kv_semantic_model(
     parse_result: ParseResult,
     python_index: PythonIndex,
     config: ServerConfig,
+    kv_index: KvIndex | None = None,
 ) -> KvSemanticModel:
     """Build semantic scopes for one parsed KV document."""
     diagnostics: list[Diagnostic] = []
     scopes: list[KvScope] = []
+    kv_index = _document_kv_index(document, parse_result, kv_index)
 
     app_binding = _build_app_binding(
         python_index,
@@ -64,6 +67,7 @@ def build_kv_semantic_model(
         document,
         python_index,
         config,
+        parse_result,
     )
 
     for item in parse_result.document.items:
@@ -72,6 +76,7 @@ def build_kv_semantic_model(
                 document,
                 item,
                 python_index,
+                kv_index,
             )
             scope = _build_scope(
                 document=document,
@@ -81,6 +86,7 @@ def build_kv_semantic_model(
                 app_binding=app_binding,
                 global_bindings=global_bindings,
                 python_index=python_index,
+                kv_index=kv_index,
                 diagnostics=diagnostics,
             )
             scopes.append(scope)
@@ -91,6 +97,7 @@ def build_kv_semantic_model(
                 document,
                 item,
                 python_index,
+                kv_index,
             )
             scope = _build_scope(
                 document=document,
@@ -100,6 +107,7 @@ def build_kv_semantic_model(
                 app_binding=app_binding,
                 global_bindings=global_bindings,
                 python_index=python_index,
+                kv_index=kv_index,
                 diagnostics=diagnostics,
             )
             scopes.append(scope)
@@ -120,6 +128,7 @@ def _build_scope(
     app_binding: KvBinding,
     global_bindings: tuple[KvBinding, ...],
     python_index: PythonIndex,
+    kv_index: KvIndex,
     diagnostics: list[Diagnostic],
 ) -> KvScope:
     root_value = _with_local_members(
@@ -144,6 +153,7 @@ def _build_scope(
             else None
         ),
         python_index=python_index,
+        kv_index=kv_index,
         diagnostics=diagnostics,
     )
 
@@ -175,6 +185,7 @@ def _collect_body_semantics(
     current_value: KvValue,
     current_widget: WidgetNode | None,
     python_index: PythonIndex,
+    kv_index: KvIndex,
     diagnostics: list[Diagnostic],
 ) -> tuple[
     tuple[KvBinding, ...],
@@ -190,6 +201,7 @@ def _collect_body_semantics(
         current_value=current_value,
         current_widget=current_widget,
         python_index=python_index,
+        kv_index=kv_index,
         bindings=bindings,
         widget_values=widget_values,
         names=names,
@@ -209,6 +221,7 @@ def _visit_body(
     current_value: KvValue,
     current_widget: WidgetNode | None,
     python_index: PythonIndex,
+    kv_index: KvIndex,
     bindings: list[KvBinding],
     widget_values: list[KvWidgetValue],
     names: set[str],
@@ -220,6 +233,7 @@ def _visit_body(
                 document,
                 item,
                 python_index,
+                kv_index,
             )
             widget_value = _with_local_members(
                 document,
@@ -239,6 +253,7 @@ def _visit_body(
                 current_value=widget_value,
                 current_widget=item,
                 python_index=python_index,
+                kv_index=kv_index,
                 bindings=bindings,
                 widget_values=widget_values,
                 names=names,
@@ -246,7 +261,7 @@ def _visit_body(
             )
             continue
 
-        if _property_name(document, item) == "id":
+        if item.name == "id":
             _add_id_binding(
                 document=document,
                 node=item,
@@ -264,6 +279,7 @@ def _visit_body(
                 current_value=current_value,
                 current_widget=current_widget,
                 python_index=python_index,
+                kv_index=kv_index,
                 bindings=bindings,
                 widget_values=widget_values,
                 names=names,
@@ -360,7 +376,7 @@ def _local_property_symbol(
     )
     owner_name = owner.type_name or "kv"
     annotation = (
-        _expression_annotation(node.value.text)
+        expression_annotation(node.value.text)
         if node.value is not None
         else None
     )
@@ -377,84 +393,6 @@ def _local_property_symbol(
         annotation=annotation,
         documentation="KV-created instance property",
     )
-
-
-def _expression_annotation(source: str) -> str | None:
-    try:
-        expression = ast.parse(
-            source,
-            mode="eval",
-        ).body
-    except SyntaxError:
-        return None
-
-    return _node_annotation(expression)
-
-
-def _node_annotation(node: ast.expr) -> str | None:
-    if isinstance(node, ast.Constant):
-        value = node.value
-
-        if value is None:
-            return "None"
-
-        if isinstance(value, bool):
-            return "bool"
-
-        if isinstance(value, int):
-            return "int"
-
-        if isinstance(value, float):
-            return "float"
-
-        if isinstance(value, str):
-            return "str"
-
-        return None
-
-    if isinstance(node, ast.JoinedStr):
-        return "str"
-
-    if isinstance(node, ast.List):
-        return "list[Any]"
-
-    if isinstance(node, ast.Tuple):
-        return "tuple[Any, ...]"
-
-    if isinstance(node, ast.Dict):
-        return "dict[Any, Any]"
-
-    if isinstance(node, ast.Set):
-        return "set[Any]"
-
-    if isinstance(node, ast.Lambda):
-        return "Callable[..., Any]"
-
-    if isinstance(node, ast.IfExp):
-        first = _node_annotation(node.body)
-        second = _node_annotation(node.orelse)
-
-        if first is None or second is None:
-            return None
-
-        if first == second:
-            return first
-
-        return f"{first} | {second}"
-
-    if (
-        isinstance(node, ast.UnaryOp)
-        and isinstance(node.operand, ast.Constant)
-    ):
-        value = node.operand.value
-
-        if isinstance(value, int) and not isinstance(value, bool):
-            return "int"
-
-        if isinstance(value, float):
-            return "float"
-
-    return None
 
 
 def _add_id_binding(
@@ -555,18 +493,59 @@ def _build_global_bindings(
     document: TextDocument,
     python_index: PythonIndex,
     config: ServerConfig,
+    parsed: ParseResult,
 ) -> tuple[KvBinding, ...]:
     bindings: list[KvBinding] = []
     names: set[str] = set()
 
-    for imported_name, target in _directive_imports(document):
-        binding = _global_binding(
-            imported_name,
-            target,
-            python_index,
+    declared: dict[str, KvBinding] = {}
+    for directive in parsed.document.items:
+        if not isinstance(directive, DirectiveNode):
+            continue
+        if directive.name not in {"import", "set"}:
+            continue
+        parts = directive.arguments.split(None, 1)
+        if len(parts) != 2 or not parts[0].isidentifier():
+            continue
+        name, source = parts
+        if directive.name == "import":
+            declared[name] = _global_binding(name, source, python_index)
+            continue
+        relative = directive.token.text.find(directive.arguments)
+        start = directive.token.span.start + relative
+        selection = Span(start, start + len(name))
+        annotation = expression_annotation(source)
+        literals = ()
+        try:
+            literal = ast.literal_eval(source)
+        except (ValueError, TypeError, SyntaxError):
+            pass
+        else:
+            if literal is None or isinstance(literal, (str, int, float)):
+                literals = (literal,)
+        if annotation is None and source in declared:
+            value = declared[source].value
+            annotation = value.type_name
+            if value.symbol is not None:
+                literals = value.symbol.literal_values
+        symbol = Symbol(
+            name=name,
+            qualified_name=f"kv_constants.{name}",
+            kind=SymbolKind.CONSTANT,
+            location=SymbolLocation(
+                document.uri, directive.span, selection,
+            ),
+            annotation=annotation,
+            literal_values=literals,
         )
-        bindings.append(binding)
-        names.add(imported_name)
+        declared[name] = KvBinding(
+            name=name,
+            kind=KvBindingKind.GLOBAL,
+            value=KvValue.from_symbol(symbol),
+            declaration_span=selection,
+        )
+    bindings.extend(declared.values())
+    names.update(declared)
 
     for name, target in config.globals.items():
         if name in names:
@@ -662,7 +641,7 @@ def _resolve_symbol_annotation(
 
     module_name, _, _ = symbol.qualified_name.rpartition(".")
 
-    for reference in _annotation_references(annotation):
+    for reference in annotation_references(annotation):
         class_symbol = python_index.resolve_class(
             reference,
             from_module=module_name,
@@ -674,47 +653,21 @@ def _resolve_symbol_annotation(
     return None
 
 
-def _annotation_references(annotation: str) -> tuple[str, ...]:
-    annotation = annotation.strip().strip("'\"")
-
-    if annotation.startswith("Optional[") and annotation.endswith("]"):
-        annotation = annotation[9:-1]
-
-    references: list[str] = []
-
-    for part in annotation.split("|"):
-        reference = part.strip()
-
-        if reference in {"", "None", "NoneType"}:
-            continue
-
-        references.append(reference)
-
-    return tuple(references)
-
-
 def _rule_root_value(
     document: TextDocument,
     rule: RuleNode,
     python_index: PythonIndex,
+    kv_index: KvIndex,
 ) -> KvValue:
-    class_name, base_name = _rule_class_names(
-        document,
-        rule,
+    selectors = tuple(
+        selector for selector in rule.selectors
+        if not getattr(selector, "is_class_selector", False)
     )
-    lookup_name = base_name or class_name
-
-    if lookup_name is None:
+    if not selectors:
         return KvValue.unknown()
-
-    class_symbol = _resolve_widget_class(
-        lookup_name,
-        python_index,
-    )
-
+    name = selectors[0].name.text
     return KvValue.instance(
-        class_name or lookup_name,
-        class_symbol,
+        name, resolve_widget_class(name, python_index, kv_index),
     )
 
 
@@ -722,140 +675,42 @@ def _widget_value(
     document: TextDocument,
     widget: WidgetNode,
     python_index: PythonIndex,
+    kv_index: KvIndex,
 ) -> KvValue:
-    class_name = _widget_name(
-        document,
-        widget,
-    )
-
-    if class_name is None:
-        return KvValue.unknown()
-
-    class_symbol = _resolve_widget_class(
-        class_name,
-        python_index,
-    )
-
+    name = widget.class_name
     return KvValue.instance(
-        class_name,
-        class_symbol,
+        name, resolve_widget_class(name, python_index, kv_index),
     )
 
 
-def _resolve_widget_class(
-    name: str,
-    python_index: PythonIndex,
-) -> ClassSymbol | None:
-    class_symbol = python_index.resolve_class(name)
-
-    if class_symbol is not None:
-        return class_symbol
-
-    matches = python_index.classes_named(name)
-
-    if len(matches) == 1:
-        return matches[0]
-
-    return None
-
-
-def _rule_class_names(
+def _document_kv_index(
     document: TextDocument,
-    rule: RuleNode,
-) -> tuple[str | None, str | None]:
-    header = _header_text(
-        document,
-        rule.span,
-    )
-    opening = header.find("<")
-    closing = header.find(">", opening + 1)
-
-    if opening == -1 or closing == -1:
-        return None, None
-
-    selector = header[opening + 1:closing]
-    selector = selector.split(",", maxsplit=1)[0].strip()
-    selector = selector.removeprefix("-").strip()
-
-    if "@" not in selector:
-        return selector or None, None
-
-    class_name, base_name = selector.split("@", maxsplit=1)
-
-    return (
-        class_name.strip() or None,
-        base_name.strip() or None,
-    )
-
-
-def _widget_name(
-    document: TextDocument,
-    widget: WidgetNode,
-) -> str | None:
-    header = _header_text(
-        document,
-        widget.span,
-    )
-    name, separator, _ = header.partition(":")
-
-    if not separator:
-        return None
-
-    name = name.strip()
-
-    if _IDENTIFIER_PATTERN.fullmatch(name) is None:
-        return None
-
-    return name
-
-
-def _property_name(
-    document: TextDocument,
-    node: PropertyNode,
-) -> str | None:
-    header = _header_text(
-        document,
-        node.span,
-    )
-    name, separator, _ = header.partition(":")
-
-    if not separator:
-        return None
-
-    name = name.strip().removeprefix("-").strip()
-
-    if _IDENTIFIER_PATTERN.fullmatch(name) is None:
-        return None
-
-    return name
-
-
-def _directive_imports(
-    document: TextDocument,
-) -> tuple[tuple[str, str], ...]:
-    return tuple(
+    parsed: ParseResult,
+    existing: KvIndex | None,
+) -> KvIndex:
+    if existing is not None:
+        return existing
+    index = KvIndex()
+    index.replace(
+        document.uri,
         (
-            match.group("name"),
-            match.group("target"),
-        )
-        for match in _IMPORT_DIRECTIVE_PATTERN.finditer(document.text)
+            KvClassSymbol(
+                name=selector.name.text,
+                uri=document.uri,
+                span=selector.name.span,
+                bases=tuple(base.text for base in selector.base_names),
+                is_dynamic=selector.is_dynamic,
+                properties=tuple(
+                    node for node in rule.body
+                    if isinstance(node, PropertyNode)
+                ),
+            )
+            for rule in parsed.document.items if isinstance(rule, RuleNode)
+            for selector in rule.selectors
+            if not getattr(selector, "is_class_selector", False)
+        ),
     )
-
-
-def _header_text(
-    document: TextDocument,
-    span: Span,
-) -> str:
-    line_end = document.text.find(
-        "\n",
-        span.start,
-        span.end,
-    )
-
-    if line_end == -1:
-        line_end = span.end
-
-    return document.text[span.start:line_end].strip()
+    return index
 
 
 def _source_text(

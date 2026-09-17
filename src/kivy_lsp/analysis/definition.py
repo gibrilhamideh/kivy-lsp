@@ -85,6 +85,7 @@ class KvDefinitionEngine:
         self._resolver = KvExpressionResolver(
             python_index,
             config,
+            kv_index,
         )
 
     def definition_at(
@@ -801,4 +802,3 @@ def _line_byte_offset(
         line.encode("utf-8")[:byte_column].decode("utf-8")
     )
     return start + column
-

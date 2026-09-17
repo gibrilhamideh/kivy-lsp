@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from bisect import bisect_right
 from dataclasses import dataclass
 
 from kivy_lsp.kv.lexer import LexResult, lex
@@ -66,16 +68,22 @@ class ParseResult:
 def parse(source: str) -> ParseResult:
     """Lex and parse a complete KV document."""
 
-    return _Parser(lex(source)).run()
+    return _Parser(lex(source), source).run()
 
 
 class _Parser:
     """Error-tolerant recursive-descent parser for KV syntax."""
 
-    def __init__(self, lex_result: LexResult) -> None:
+    def __init__(self, lex_result: LexResult, source: str) -> None:
         self._tokens = lex_result.tokens
         self._stream = TokenStream(lex_result.tokens)
         self._diagnostics = list(lex_result.diagnostics)
+        self._source = source
+        self._line_starts = [0]
+        self._line_starts.extend(
+            match.end() for match in re.finditer(r"\r\n|\r|\n", source)
+        )
+        self._indent_width = self._find_indent_width()
 
     def run(self) -> ParseResult:
         items: list[DocumentItem] = []
@@ -124,7 +132,9 @@ class _Parser:
     def _parse_directive(self) -> DirectiveNode:
         token = self._stream.advance()
         content = token.text[2:].strip()
-        name, separator, arguments = content.partition(" ")
+        parts = content.split(maxsplit=1)
+        name = parts[0] if parts else ""
+        arguments = parts[1] if len(parts) > 1 else ""
 
         if not name:
             self._report(
@@ -139,16 +149,24 @@ class _Parser:
             span=token.span,
             token=token,
             name=name,
-            arguments=arguments.strip() if separator else "",
+            arguments=arguments,
         )
 
     def _parse_rule(self) -> RuleNode:
         opening = self._stream.advance()
         selectors: list[RuleSelectorNode] = []
         self._skip_inline_spaces()
+        clear_previous = None
+
+        if self._is_clear_previous():
+            clear_previous = self._stream.advance()
+            self._skip_inline_spaces()
 
         while not self._at_rule_header_end:
-            if not self._stream.check(TokenKind.IDENTIFIER):
+            if self._stream.current.kind not in {
+                TokenKind.IDENTIFIER,
+                TokenKind.DOT,
+            }:
                 self._report_current(
                     message="expected a class name in rule selector",
                     code="kv-expected-rule-name",
@@ -186,6 +204,7 @@ class _Parser:
             closing=closing,
             colon=colon,
             body=body,
+            clear_previous=clear_previous,
         )
 
     @property
@@ -197,6 +216,7 @@ class _Parser:
         }
 
     def _parse_rule_selector(self) -> RuleSelectorNode:
+        class_marker = self._stream.consume(TokenKind.DOT)
         name = self._expect(
             kind=TokenKind.IDENTIFIER,
             message="expected a class name",
@@ -237,10 +257,14 @@ class _Parser:
             end = dynamic_marker.span.end
 
         return RuleSelectorNode(
-            span=Span(start=name.span.start, end=end),
+            span=Span(
+                start=(class_marker or name).span.start,
+                end=end,
+            ),
             name=name,
             dynamic_marker=dynamic_marker,
             base_names=tuple(base_names),
+            class_marker=class_marker,
         )
 
     def _parse_widget(self) -> WidgetNode:
@@ -351,6 +375,7 @@ class _Parser:
             value = self._parse_inline_expression()
             self._consume_line_end()
             end = value.span.end if value is not None else colon.span.end
+            self._validate_expression_layout(colon, value)
 
             return PropertyNode(
                 span=Span(start=start, end=end),
@@ -362,8 +387,12 @@ class _Parser:
             )
 
         self._consume_line_end()
-        value, body = self._parse_property_content()
+        name = "".join(token.text for token in name_tokens)
+        value, body = self._parse_property_content(
+            canvas=name in {"canvas", "canvas.before", "canvas.after"}
+        )
         fallback = colon.span.end
+        self._validate_expression_layout(colon, value)
 
         if value is not None:
             fallback = value.span.end
@@ -378,6 +407,84 @@ class _Parser:
             value=value,
             body=body,
         )
+
+    def _find_indent_width(self) -> int:
+        for line in self._source.splitlines():
+            content = line.lstrip(" \t")
+
+            if not content or content.startswith("#"):
+                continue
+
+            prefix = line[:len(line) - len(content)]
+            width = len(prefix.replace("\t", "    "))
+
+            if width:
+                return width
+
+        return 4
+
+    def _validate_expression_layout(
+        self,
+        colon: Token,
+        expression: ExpressionNode | None,
+    ) -> None:
+        if expression is None:
+            return
+
+        header_line = bisect_right(self._line_starts, colon.span.start) - 1
+        first_line = (
+            bisect_right(self._line_starts, expression.span.start) - 1
+        )
+        last_line = (
+            bisect_right(self._line_starts, expression.span.end - 1) - 1
+        )
+
+        if first_line == header_line:
+            if last_line > header_line:
+                self._report(
+                    colon,
+                    "a multiline value must start below its property header",
+                    "kv-inline-multiline-value",
+                )
+
+            return
+
+        header_start = self._line_starts[header_line]
+        header = self._source[header_start:colon.span.start]
+        header_prefix = header[:len(header) - len(header.lstrip(" \t"))]
+        expected = (
+            len(header_prefix.replace("\t", "    ")) + self._indent_width
+        )
+
+        for line_index in range(first_line, last_line + 1):
+            line_start = self._line_starts[line_index]
+            line_end = (
+                self._line_starts[line_index + 1]
+                if line_index + 1 < len(self._line_starts)
+                else len(self._source)
+            )
+            line = self._source[line_start:line_end]
+            content = line.lstrip(" \t")
+
+            if not content.strip() or content.startswith("#"):
+                continue
+
+            prefix = line[:len(line) - len(content)]
+
+            if len(prefix.replace("\t", "    ")) == expected:
+                continue
+
+            self._diagnostics.append(
+                Diagnostic(
+                    message=(
+                        "property expression lines must use the same "
+                        "indentation, one level below the property"
+                    ),
+                    span=Span(line_start, line_start + len(prefix)),
+                    severity=DiagnosticSeverity.ERROR,
+                    code="kv-invalid-expression-indentation",
+                )
+            )
 
     def _parse_property_name(self) -> tuple[Token, ...]:
         tokens: list[Token] = [
@@ -438,6 +545,8 @@ class _Parser:
 
     def _parse_property_content(
         self,
+        *,
+        canvas: bool = False,
     ) -> tuple[ExpressionNode | None, tuple[BodyNode, ...]]:
         if not self._consume_indentation():
             return None, ()
@@ -447,7 +556,7 @@ class _Parser:
         if self._stream.consume(TokenKind.DEDENT) is not None:
             return None, ()
 
-        if self._looks_like_body_declaration():
+        if canvas and self._looks_like_body_declaration():
             return None, self._parse_body()
 
         return self._parse_block_expression(), ()

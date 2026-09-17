@@ -1,0 +1,391 @@
+{
+  "baseline_archive": "src(2).zip",
+  "baseline_archive_sha256": "3ecf09dbfe5e6942af62f9ac9e24b85185023a6e82402f5a26bc14d9a82bb928",
+  "date": "2026-09-17",
+  "files": [
+    {
+      "path": "README-update.md",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "1c2d4b27178d176f32a09254101569c06ce2f14bd3a7d5574f27203168fb6a35"
+    },
+    {
+      "path": "docs/implementation.md",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "c5aafb30d640122b10a2efecd26c34ab4391694998317e21f1e0ce96b9c1ca23"
+    },
+    {
+      "path": "docs/performance.md",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "a1035bbc249bb0750551cf53684707486ae85a86b6e5747033e472d581398e51"
+    },
+    {
+      "path": "docs/performance_samples.json",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "af1b7d6b89f9f091e73d993985bc2ce407f1d44d361fa2927a2266d10978b19f"
+    },
+    {
+      "path": "docs/validation.md",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "db3caef5ce644930f23163e22bac07962c4eb416623ed6d56e595d7d9afd28c1"
+    },
+    {
+      "path": "scripts/benchmark_workspace.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "ca7dd3186fd6a4a9d323289b007050b550b0e9aa0fec2e08279ae3e5062f37e6"
+    },
+    {
+      "path": "src/kivy_lsp/__main__.py",
+      "change": "modified",
+      "baseline_sha256": "eada8d3853426355427e73edcd943188fcd5db708651b8f6b78439815eb0be39",
+      "updated_sha256": "23ff74f2dce56b5b85611a486782e872c4c8c632ba756f71c920b7c7281172ee"
+    },
+    {
+      "path": "src/kivy_lsp/analysis/call_argument_context.py",
+      "change": "modified",
+      "baseline_sha256": "6f38028b54a96f89e51eb22d1bc601a2b8161ed4cb2a6985de15a65dd33e95bd",
+      "updated_sha256": "51efd38e69f5e58dae941704302059289d1fc2f2a2428cbbcf8b831af38eb80c"
+    },
+    {
+      "path": "src/kivy_lsp/analysis/completion.py",
+      "change": "modified",
+      "baseline_sha256": "66e2484b6c2810216050ea5977d12fb91f6512ff7e0b2ea790a2f7a9f9b569a6",
+      "updated_sha256": "5500a95555273525a6bf2e76629824b0fadbf897dc1f677206e0a5801bd6e3b8"
+    },
+    {
+      "path": "src/kivy_lsp/analysis/definition.py",
+      "change": "modified",
+      "baseline_sha256": "aab419fded0a60da3b4bc3e9dbd8c9fca105e7640fbf96849c43ce1d7121a5d1",
+      "updated_sha256": "422f6cfe92ceaaa656db73bf57e8cec602c8e0bdf9e4bb17425c4ddf77e5651c"
+    },
+    {
+      "path": "src/kivy_lsp/analysis/diagnostics.py",
+      "change": "modified",
+      "baseline_sha256": "af3fb8423b84c147059d8eeb25e4c577d9822e143f35cdd30cddc39c2a2ccab0",
+      "updated_sha256": "10cb748fb328fe973a9da5308123f20a721cda175fdf563ed831f14376ca757e"
+    },
+    {
+      "path": "src/kivy_lsp/analysis/editor_features.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "19040eb1c4cc375e8d19357c95e01e4ad51442bbbdddde6b433b892db2092a36"
+    },
+    {
+      "path": "src/kivy_lsp/analysis/expression.py",
+      "change": "modified",
+      "baseline_sha256": "837f5db20dd9b008bfb71ae4727c28ae5989d5a6fb8e4a20419b6019d5aee7a5",
+      "updated_sha256": "a98d4c1967d91a682726cb03ffa1ebf0620c7542aca360ef77f18da8362fe209"
+    },
+    {
+      "path": "src/kivy_lsp/analysis/expression_diagnostics.py",
+      "change": "modified",
+      "baseline_sha256": "c715653b4d962c67d43cf2eaa43ba3c944d8357fb2ccf106afa44256cc067903",
+      "updated_sha256": "62bbf404c63ab001387b45c03e12b143d5dc29acc009cdf6dcf00c7bace797e2"
+    },
+    {
+      "path": "src/kivy_lsp/analysis/references.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "04b2f8d2062b893b9533d8a01f8dec12f1ea21ee066b80fbd6c173b01dce7672"
+    },
+    {
+      "path": "src/kivy_lsp/analysis/scope.py",
+      "change": "modified",
+      "baseline_sha256": "d349c0822c57e1be0a0b3a47e6853b006ac5fba4acb1534596953616fd49eb7c",
+      "updated_sha256": "b5303c313e4f1909c98ba79cb45be4716ca02cd09e0315b6ecace3177a199aa4"
+    },
+    {
+      "path": "src/kivy_lsp/analysis/scope_builder.py",
+      "change": "modified",
+      "baseline_sha256": "b8e2b4b376fd489f192914a08aa71c5344a222cc45a830215753e05e39c6f5c7",
+      "updated_sha256": "9d0fdc5e29fb63400c53fedaaec3eb702f6f65182f95bff3caed9c1c2caeb0bf"
+    },
+    {
+      "path": "src/kivy_lsp/analysis/static_values.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "646280b114b18f96688bd088e4303762f2725b770feddb112b183148dee53ee0"
+    },
+    {
+      "path": "src/kivy_lsp/analysis/value_inference.py",
+      "change": "modified",
+      "baseline_sha256": "cc6fd6d564ec6af64e675a79c3786f17c81e64dac9935d9711dbc647ef0bbb1e",
+      "updated_sha256": "02133e5e14eb9de1a80a30dd99ccc1e5db26d6bb4475b9af7f0bdb8495a7aea2"
+    },
+    {
+      "path": "src/kivy_lsp/analysis/widget_resolution.py",
+      "change": "modified",
+      "baseline_sha256": "099e00a8b895be93fcb1026af6eb231b708b6e6fc2cd2cd00479124601248d70",
+      "updated_sha256": "2dc21fafcc218cd16e869b8095bdbaf5c9f42e446b669146ade0855fb90d1510"
+    },
+    {
+      "path": "src/kivy_lsp/cli.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "d8229da9712da171ee18b6ea2e51d2afb376dab93e6fd038649c6e99bd475429"
+    },
+    {
+      "path": "src/kivy_lsp/config.py",
+      "change": "modified",
+      "baseline_sha256": "a2e38878e9b40933a99f4309d61c0339fc005be624d933f37c988d8b5acbc0c9",
+      "updated_sha256": "60a8c04d43c2b1a4c7bbea4d3fd75a0860a9c6c0971579325d07d88a00be47dc"
+    },
+    {
+      "path": "src/kivy_lsp/features/documents.py",
+      "change": "modified",
+      "baseline_sha256": "3ec1190b40aff4eadc12f829273fcc5725158636de7fe222b2c6b09624aec6b1",
+      "updated_sha256": "0e947090df9da52c5ad559684311398c6294c84f1389f409d9143992d78bf4ad"
+    },
+    {
+      "path": "src/kivy_lsp/features/editor_features.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "ebe335c7e91e2745024e5956bdab997316205e632e1f6ecf793b965bd1e2daa4"
+    },
+    {
+      "path": "src/kivy_lsp/features/formatting.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "645fa311817e7a714f7e39b05cb20f2e6ac3c3324a61634a37af1740a5dc7cd2"
+    },
+    {
+      "path": "src/kivy_lsp/features/navigation.py",
+      "change": "modified",
+      "baseline_sha256": "4fd568417b09d5edccbb2f8d80e9f52c9cdd677599e1a0333b75ccfdd07167eb",
+      "updated_sha256": "3d2acd54c5a06e20db5a0548cdd5da0355b6c7da1a048631c8103209e60e550d"
+    },
+    {
+      "path": "src/kivy_lsp/features/refactoring.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "fbd7f1208910ba01f7b2401ea9b6d32b15867764a632ce98bd69e07ecec43748"
+    },
+    {
+      "path": "src/kivy_lsp/features/workspace.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "bf9e90f613a6387efab9a3aa75601ceca9cc36e3d0a25fe710a60557cca5dd6e"
+    },
+    {
+      "path": "src/kivy_lsp/formatting/__init__.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "c671b60401108c274c03bbe287ee56665bd88c15e72ba1812b7e28c04cd20f56"
+    },
+    {
+      "path": "src/kivy_lsp/formatting/expressions.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "abcd0b1e7800d3284bf2cdceb1f270e4e3fa37236dd89f0b0959493920e80a1a"
+    },
+    {
+      "path": "src/kivy_lsp/formatting/formatter.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "137a887b0b8c9988cfb26d5232ceb1a86e236d90fd2841c8051b76d6069eca27"
+    },
+    {
+      "path": "src/kivy_lsp/formatting/options.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "e691e485496065ee1bcc9a936a7cc0adf1103a5455f1cad7413dd852346c0dfa"
+    },
+    {
+      "path": "src/kivy_lsp/i18n/index.py",
+      "change": "modified",
+      "baseline_sha256": "de762ec73ea6ae5f44729ef78045b06a282cba9db01c97c924f61146e14d995a",
+      "updated_sha256": "b02c4e0aa5e163e0dd12be0341f92cc0735fd2b4212013ce80d82025f34885d6"
+    },
+    {
+      "path": "src/kivy_lsp/kv/expression_source.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "d7ef077f68b3b683740984e07523c6480c5129adbad65e877651868f75266305"
+    },
+    {
+      "path": "src/kivy_lsp/kv/index.py",
+      "change": "modified",
+      "baseline_sha256": "89a76ec578b254d66af71d078b9f30c1a68bf83c4b706088951dc9f5c526276c",
+      "updated_sha256": "6204fe7266cb4b0ba7d4e80e1478f13ceab811a93ee281372ae3f477d30443e7"
+    },
+    {
+      "path": "src/kivy_lsp/kv/lexer.py",
+      "change": "modified",
+      "baseline_sha256": "330d2001ec62f6aa631f4019c3eb5b46a0815e0b24e817342674380cd8498161",
+      "updated_sha256": "c17d8f88ee604841fae713da78ea950a5055151590ab395b5e62b11956f5e28f"
+    },
+    {
+      "path": "src/kivy_lsp/kv/nodes.py",
+      "change": "modified",
+      "baseline_sha256": "965662e6cf561374a9eceb2904f2623d3f0e6ec05b1abe2fee6adef20a432129",
+      "updated_sha256": "0293bc461ef443c70fecbde9f2321059212ec5c2c69fd116c2b4ffa3672dbd94"
+    },
+    {
+      "path": "src/kivy_lsp/kv/parser.py",
+      "change": "modified",
+      "baseline_sha256": "b8e777da05c5a7bfdcdf00d52ede3ffb36a248c30a283c56f41520811b149321",
+      "updated_sha256": "787933e223132e2829e8488442ef3f43c0df44e3fee19dcfc620b2370323240e"
+    },
+    {
+      "path": "src/kivy_lsp/model/symbol.py",
+      "change": "modified",
+      "baseline_sha256": "d483f122f8b299b6fb5ef1ba21bf3970ef2f8442f9f15a728d10b90d223243c8",
+      "updated_sha256": "41aee99daa242a4033b8e93bade6500f719ad8338c15517503ad77eb77a5a675"
+    },
+    {
+      "path": "src/kivy_lsp/model/uri.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "79f0863a57d38b169403c8a2bd14cfe9a5530597b207bbb709402383ec3c3960"
+    },
+    {
+      "path": "src/kivy_lsp/model/value_type.py",
+      "change": "modified",
+      "baseline_sha256": "94b58fd6b9084bc9e6a22a7b258901b343345a526fa353557aa6a94659df323b",
+      "updated_sha256": "80f806ab51a608b16ded73b5fcdae749eb6f450db09b8b28c0b880746bfb2c72"
+    },
+    {
+      "path": "src/kivy_lsp/python/environment.py",
+      "change": "modified",
+      "baseline_sha256": "09d67bb9666009dd6f7126a0755f7383eb0fbfd25e8250e564048d8012870ff9",
+      "updated_sha256": "5e5515e8ae93314d910237f7a50b00fe48365df9d11f2de7da8f30b955006fb8"
+    },
+    {
+      "path": "src/kivy_lsp/python/index.py",
+      "change": "modified",
+      "baseline_sha256": "8948c1110c2d76842993e5c0e3cb872d56a4c5ff48a33ea766365911aee06df1",
+      "updated_sha256": "dc25fef1b66433fcc33a75efd856205af3431bb2fd12dcbc4e6243394dd2cb6b"
+    },
+    {
+      "path": "src/kivy_lsp/python/indexer.py",
+      "change": "modified",
+      "baseline_sha256": "419c5f21a3d8a09540a94f4e99eb92adeb9baaa4450a75b9639de06dc8f14d9d",
+      "updated_sha256": "418f613ab0e90be5e32b626d9f5a7cbc00baa4b61f87e0027cd5426c8c69ae9e"
+    },
+    {
+      "path": "src/kivy_lsp/python/type_resolver.py",
+      "change": "modified",
+      "baseline_sha256": "776b61126f5146f6be9625a4df2e926701ac4b1f3fbc2856b5b267b868b8a49f",
+      "updated_sha256": "5792cdd8565e823588501813f7e5d79cd55f0437761638bbc643265a79948682"
+    },
+    {
+      "path": "src/kivy_lsp/server.py",
+      "change": "modified",
+      "baseline_sha256": "e25439e4d6bb679bd4e740dce0793625502c4f2754ac0b142d86c305bb61d945",
+      "updated_sha256": "53f849028a01d32da34f6d48b844905adf797f9ab44b6ec820f04b3db49e7986"
+    },
+    {
+      "path": "src/kivy_lsp/workspace/discovery.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "f3f4c3139d12f658e83a4256021c8c7b6e8d400e02719ac7899ae8d30fdf9bb1"
+    },
+    {
+      "path": "src/kivy_lsp/workspace/document.py",
+      "change": "modified",
+      "baseline_sha256": "454512ac511943fbfeade28e5355b0899a49a284111319fa3c004b513900ba08",
+      "updated_sha256": "f8d99f02d8c307c1ed606a25c4013db686a19906973b93b4cd04b3bbb2848ab4"
+    },
+    {
+      "path": "src/kivy_lsp/workspace/includes.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "5744d4ab8690f9c66cc1abfa66a6f135531f720df7965fb40eea38f7419e9cef"
+    },
+    {
+      "path": "src/kivy_lsp/workspace/kv_scanner.py",
+      "change": "modified",
+      "baseline_sha256": "9096b247c63846b5193c1ecf059ae1ed9ca1ab0507cd23e5713ca70d17599719",
+      "updated_sha256": "fdb724eebf3d50caf5a7e22ee4f3cb442ec3d1682d86031c3e186ab702c7f6f6"
+    },
+    {
+      "path": "src/kivy_lsp/workspace/project.py",
+      "change": "modified",
+      "baseline_sha256": "b22759337da213b0e108ece4077b85ddd7ec58296c000bb00fbcb8c996054d3f",
+      "updated_sha256": "4db7a0e885c50feefa6d108c49380e37cef1a7e2d5f21447894d45ca00d910a3"
+    },
+    {
+      "path": "src/kivy_lsp/workspace/python_scanner.py",
+      "change": "modified",
+      "baseline_sha256": "fafd94ff1c8eff3ee500c71f5947425b3a77da1163de7cb9a850f582854fab4b",
+      "updated_sha256": "9a78b808acd05d304a84959452b04aedf15dba32fed2e30ad0b76416c60dc3a5"
+    },
+    {
+      "path": "tests/test_configuration.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "96e7cdd8c64b39f712b0ef7fa796234065a84f92f53bee7d20a0489edcfeeae6"
+    },
+    {
+      "path": "tests/test_document_encoding.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "72e00e2aa49a7125d4bd97c21d1d1ef43f7b45dfc4f0d2d96384c09ea56a1673"
+    },
+    {
+      "path": "tests/test_editor_features.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "cc1042dfa3fa4c43c655946dedb771f235a7f9115a088b11d1297782ce34f9b7"
+    },
+    {
+      "path": "tests/test_formatter_compatibility.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "d85c5a877b7073e773578e2148376f5f00c938b6cccd983f18fe90e643430be6"
+    },
+    {
+      "path": "tests/test_formatting.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "75e52c1fd3db7a241f1cb69af5b2686da6f9105d80ae2db10c259168de5c0cae"
+    },
+    {
+      "path": "tests/test_parser_regressions.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "46932388174131358665ced288bba1ad032d1afa1df78dbd527db845ca737c4b"
+    },
+    {
+      "path": "tests/test_python_regressions.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "1fe6fd9d722770cfb60c5624ad0b098a9aa6ccc028d9202c9224c74530d9fbee"
+    },
+    {
+      "path": "tests/test_reference_safety.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "bd899b18c9c5b8f5467005c72003df16f75942c6dd0a6b5c0ae54e7ad58a3f84"
+    },
+    {
+      "path": "tests/test_semantic_regressions.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "ff8c732f9d0ae07038a401bc52d7aa5f0fcf0fc3c04558dc836c85e5ecc19523"
+    },
+    {
+      "path": "tests/test_server_protocol.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "64ea2d0800e3d2b3aca97da131d36f1d979d9cbaef56839cfc4f65c81857ff73"
+    },
+    {
+      "path": "tests/test_workspace.py",
+      "change": "added",
+      "baseline_sha256": null,
+      "updated_sha256": "784ce63d8707e06ffa2a3241445bbd561658b6bc11cba39e731398cc6d55a1a1"
+    }
+  ],
+  "deleted_files": [],
+  "validation": {
+    "pytest_passed": 219,
+    "pyright_errors": 0,
+    "pyright_warnings": 0
+  }
+}

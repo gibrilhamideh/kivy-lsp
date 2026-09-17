@@ -40,16 +40,12 @@ def register_document_sync(
         uri = params.text_document.uri
         editor_document = server.workspace.get_text_document(uri)
 
-        workspace.open_document(
+        update = workspace.open_document(
             uri=uri,
             text=editor_document.source,
             version=editor_document.version,
         )
-        _publish_diagnostics(
-            server,
-            workspace,
-            uri,
-        )
+        publish_affected(server, workspace, update.affected_uris)
 
     def did_change(
         params: types.DidChangeTextDocumentParams,
@@ -62,16 +58,12 @@ def register_document_sync(
         uri = params.text_document.uri
         editor_document = server.workspace.get_text_document(uri)
 
-        workspace.update_document(
+        update = workspace.update_document(
             uri=uri,
             text=editor_document.source,
             version=editor_document.version,
         )
-        _publish_diagnostics(
-            server,
-            workspace,
-            uri,
-        )
+        publish_affected(server, workspace, update.affected_uris)
 
     def did_close(
         params: types.DidCloseTextDocumentParams,
@@ -82,14 +74,8 @@ def register_document_sync(
             return
 
         uri = params.text_document.uri
-        workspace.close_document(uri)
-
-        server.text_document_publish_diagnostics(
-            types.PublishDiagnosticsParams(
-                uri=uri,
-                diagnostics=[],
-            ),
-        )
+        update = workspace.close_document(uri)
+        publish_affected(server, workspace, update.affected_uris)
 
     register_open = server.feature(
         types.TEXT_DOCUMENT_DID_OPEN,
@@ -106,14 +92,31 @@ def register_document_sync(
     register_close(did_close)
 
 
+def publish_affected(
+    server: LanguageServer,
+    workspace: ProjectWorkspace,
+    uris: tuple[str, ...],
+) -> None:
+    """Publish every affected snapshot, including cleared diagnostics."""
+    for uri in uris:
+        _publish_diagnostics(server, workspace, uri)
+
+
 def _publish_diagnostics(
     server: LanguageServer,
     workspace: ProjectWorkspace,
     uri: str,
 ) -> None:
     document = workspace.document(uri)
+    if document is None and uri in workspace.configuration_uris:
+        document = workspace.source_document(uri) or TextDocument(
+            uri=uri, text="", position_encoding=workspace.position_encoding,
+        )
 
     if document is None:
+        server.text_document_publish_diagnostics(
+            types.PublishDiagnosticsParams(uri=uri, diagnostics=[])
+        )
         return
 
     diagnostics = [
@@ -154,4 +157,5 @@ def _to_lsp_diagnostic(
         message=diagnostic.message,
         severity=severity,
         source="kivy-lsp",
+        code=diagnostic.code,
     )

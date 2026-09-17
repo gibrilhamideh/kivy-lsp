@@ -15,6 +15,10 @@ from kivy_lsp.analysis.completion_context import (
     KvCompletionTargetKind,
     completion_target_at,
 )
+from kivy_lsp.analysis.comparison_value_context import (
+    KvComparisonValueContext,
+    comparison_value_context_at,
+)
 from kivy_lsp.analysis.expression import (
     KvExpressionResolver,
     KvResolutionKind,
@@ -37,10 +41,12 @@ from kivy_lsp.analysis.scope import (
     KvValue,
     KvValueKind,
 )
+from kivy_lsp.analysis.value_constraints import ValueConstraintResolver
 from kivy_lsp.config import ServerConfig
 from kivy_lsp.kv.context import context_at
 from kivy_lsp.kv.index import KvClassSymbol, KvIndex
 from kivy_lsp.kv.parser import ParseResult
+from kivy_lsp.model.span import Span
 from kivy_lsp.model.symbol import (
     ClassSymbol,
     ParameterKind,
@@ -149,12 +155,16 @@ class KvCompletionEngine:
         self._resolver = KvExpressionResolver(
             python_index,
             config,
+            self._kv_index,
         )
         self._property_resolver = KivyPropertyResolver(
             python_index,
         )
         self._property_value_completer = (
             KvPropertyValueCompleter()
+        )
+        self._value_constraints = ValueConstraintResolver(
+            python_index, self._resolver,
         )
 
     def complete(
@@ -169,6 +179,34 @@ class KvCompletionEngine:
             parse_result,
             offset,
         )
+        context = context_at(parse_result, offset)
+        expression = context.expression
+        if expression is None and context.property_node is not None:
+            value = context.property_node.value
+            if value is not None and offset >= value.span.end:
+                trailing = document.text[value.span.end:offset]
+                if not trailing.strip(" \t"):
+                    expression = value
+        expression_span = (
+            Span(expression.span.start, max(offset, expression.span.end))
+            if expression is not None
+            else None
+        )
+        comparison = (
+            comparison_value_context_at(
+                document, expression_span, offset,
+            )
+            if expression_span is not None
+            else None
+        )
+
+        if comparison is not None and expression_span is not None:
+            target = KvCompletionTarget(
+                kind=KvCompletionTargetKind.NAME,
+                prefix=comparison.token.prefix,
+                replacement_span=comparison.token.replacement_span,
+                expression_span=expression_span,
+            )
 
         if target is None:
             return None
@@ -193,10 +231,6 @@ class KvCompletionEngine:
                 items=items,
             )
 
-        context = context_at(
-            parse_result,
-            offset,
-        )
         self_value = self._resolver.self_value(
             document,
             scope,
@@ -208,10 +242,21 @@ class KvCompletionEngine:
             context.property_owner,
         )
         expression_start = (
-            context.expression.span.start
-            if context.expression is not None
+            expression.span.start
+            if expression is not None
             else None
         )
+
+        if comparison is not None:
+            items = self._complete_comparison_values(
+                comparison, scope, self_value,
+            )
+            if comparison.token.quote is None:
+                items = _deduplicate_and_sort([
+                    *items,
+                    *self._complete_names(scope, self_value, target.prefix),
+                ])
+            return KvCompletionResult(target=target, items=items)
 
         target, argument_items, argument_is_quoted = (
             self._complete_call_arguments(
@@ -294,6 +339,35 @@ class KvCompletionEngine:
             target=target,
             items=items,
         )
+
+    def _complete_comparison_values(
+        self,
+        context: KvComparisonValueContext,
+        scope: KvScope,
+        self_value: KvValue,
+    ) -> tuple[KvCompletionItem, ...]:
+        items: list[KvCompletionItem] = []
+        token = context.token
+        for operand in context.operands:
+            values = self._value_constraints.for_expression(
+                operand, scope, self_value=self_value,
+            )
+            for index, value in enumerate(values or ()):
+                if token.quote is not None and not isinstance(value, str):
+                    continue
+                if not str(value).casefold().startswith(
+                    token.prefix.casefold(),
+                ):
+                    continue
+                source = _call_literal_source(value, token.quote)
+                items.append(KvCompletionItem(
+                    label=source,
+                    kind=KvCompletionKind.CONSTANT,
+                    insert_text=source,
+                    sort_text=f"00:{index:04d}:{source.casefold()}",
+                    detail=f"Possible value of {operand}",
+                ))
+        return _deduplicate_and_sort(items)
 
     def _complete_names(
         self,
@@ -875,10 +949,7 @@ def _call_literal_source(
         return repr(literal)
 
     if quote == "'":
-        escaped = literal.replace(
-            "\\",
-            "\\\\",
-        ).replace(
+        escaped = json.dumps(literal, ensure_ascii=False)[1:-1].replace(
             "'",
             "\\'",
         )

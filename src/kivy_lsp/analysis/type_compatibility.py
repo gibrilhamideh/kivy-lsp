@@ -10,7 +10,8 @@ from kivy_lsp.analysis.value_inference import (
     KvInferredValue,
     KvTypeConfidence,
 )
-from kivy_lsp.model.property import KivyPropertyInfo
+from kivy_lsp.analysis.value_constraints import finite_values, property_values
+from kivy_lsp.model.property import KivyPropertyInfo, KivyPropertyKind
 from kivy_lsp.model.value_type import (
     NONE_TYPE,
     LiteralValue,
@@ -89,6 +90,16 @@ class KivyPropertyTypeChecker:
                 reason="The expression type could not be determined.",
             )
 
+        option_result = self._check_options(
+            property_info,
+            value,
+            expected,
+            actual,
+        )
+
+        if option_result is not None:
+            return option_result
+
         none_result = self._check_none(
             property_info,
             value,
@@ -142,16 +153,6 @@ class KivyPropertyTypeChecker:
                     f"Expected {expected}, but received {actual}."
                 ),
             )
-
-        option_result = self._check_options(
-            property_info,
-            value,
-            expected,
-            actual,
-        )
-
-        if option_result is not None:
-            return option_result
 
         bounds_result = self._check_numeric_bounds(
             property_info,
@@ -207,6 +208,15 @@ class KivyPropertyTypeChecker:
         if not is_none_literal and not is_none_type:
             return None
 
+        if (
+            property_info.kind is KivyPropertyKind.OPTION
+            and not property_info.options_complete
+            and property_info.accepted_type.kind in {
+                ValueTypeKind.UNKNOWN, ValueTypeKind.ANY,
+            }
+        ):
+            return None
+
         if _accepts_none(property_info):
             return CompatibilityResult(
                 compatibility=TypeCompatibility.COMPATIBLE,
@@ -231,7 +241,13 @@ class KivyPropertyTypeChecker:
         if not property_info.accepts_numeric_units:
             return None
 
-        if value.value_type.kind is not ValueTypeKind.STRING:
+        is_string_literal = value.literal_known and isinstance(
+            value.literal, str,
+        )
+        if (
+            not is_string_literal
+            and value.value_type.kind is not ValueTypeKind.STRING
+        ):
             return None
 
         if not value.literal_known:
@@ -272,75 +288,59 @@ class KivyPropertyTypeChecker:
         expected: str,
         actual: str,
     ) -> CompatibilityResult | None:
-        options = property_info.options
+        options = property_values(property_info)
 
-        if not options:
+        if options is None:
             return None
 
-        if value.literal_known:
-            if _literal_in_options(
-                value.literal,
-                options,
-            ):
-                return CompatibilityResult(
-                    compatibility=TypeCompatibility.COMPATIBLE,
-                    expected=expected,
-                    actual=actual,
-                )
-
-            return CompatibilityResult(
-                compatibility=TypeCompatibility.INCOMPATIBLE,
-                expected=expected,
-                actual=actual,
-                reason=(
-                    f"{value.literal!r} is not one of the allowed "
-                    f"values: {_options_display(options)}."
-                ),
-            )
-
-        literals = value.value_type.literals
-
-        if literals:
-            allowed_count = sum(
-                _literal_in_options(literal, options)
-                for literal in literals
-            )
-
-            if allowed_count == len(literals):
-                return CompatibilityResult(
-                    compatibility=TypeCompatibility.COMPATIBLE,
-                    expected=expected,
-                    actual=actual,
-                )
-
-            if allowed_count == 0:
-                return CompatibilityResult(
-                    compatibility=TypeCompatibility.INCOMPATIBLE,
-                    expected=expected,
-                    actual=actual,
-                    reason=(
-                        "None of the expression's possible values are "
-                        "allowed by this property."
-                    ),
-                )
-
+        literals = (
+            (value.literal,) if value.literal_known
+            else finite_values(value.value_type)
+        )
+        if literals is None:
             return CompatibilityResult(
                 compatibility=TypeCompatibility.POSSIBLE,
                 expected=expected,
                 actual=actual,
                 reason=(
-                    "Some possible expression values are not allowed "
-                    "by this property."
+                    "The value cannot be proven to be one of the allowed "
+                    f"options: {_options_display(options)}."
                 ),
             )
 
+        def allowed(literal: LiteralValue) -> bool:
+            if property_info.kind is KivyPropertyKind.OPTION:
+                return literal in options
+            return _literal_in_options(literal, options)
+
+        allowed_count = sum(allowed(literal) for literal in literals)
+        if allowed_count == len(literals):
+            return CompatibilityResult(
+                compatibility=TypeCompatibility.COMPATIBLE,
+                expected=expected,
+                actual=actual,
+            )
+        if allowed_count == 0:
+            return CompatibilityResult(
+                compatibility=(
+                    TypeCompatibility.INCOMPATIBLE
+                    if value.confidence is KvTypeConfidence.CERTAIN
+                    else TypeCompatibility.POSSIBLE
+                ),
+                expected=expected,
+                actual=actual,
+                reason=(
+                    f"{actual} is not one of the allowed "
+                    f"values: {_options_display(options)}."
+                ),
+            )
         return CompatibilityResult(
             compatibility=TypeCompatibility.POSSIBLE,
             expected=expected,
             actual=actual,
             reason=(
-                "The value cannot be proven to be one of the allowed "
-                f"options: {_options_display(options)}."
+                "Some possible expression values are not allowed "
+                "by this property."
             ),
         )
 
@@ -398,6 +398,19 @@ class KivyPropertyTypeChecker:
     ) -> CompatibilityResult | None:
         if sequence_length is None:
             return None
+
+        allowed = property_info.sequence_allowed_lengths
+        if allowed and sequence_length not in allowed:
+            lengths = ", ".join(str(length) for length in allowed)
+            return CompatibilityResult(
+                compatibility=TypeCompatibility.INCOMPATIBLE,
+                expected=expected,
+                actual=actual,
+                reason=(
+                    f"The sequence must contain {lengths} items, "
+                    f"but received {sequence_length}."
+                ),
+            )
 
         minimum = property_info.sequence_min_length
         maximum = property_info.sequence_max_length
@@ -754,10 +767,9 @@ def _expected_display(
     if property_info.allow_none and "None" not in value:
         value = f"{value} | None"
 
-    if property_info.options:
-        return _options_display(
-            property_info.options,
-        )
+    options = property_values(property_info)
+    if options is not None:
+        return _options_display(options)
 
     return value
 

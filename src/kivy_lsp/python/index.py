@@ -44,6 +44,8 @@ class PythonIndex:
             tuple[str, bool],
             tuple[Symbol, ...],
         ] = {}
+        self._mro_cache: dict[str, tuple[ClassSymbol, ...] | None] = {}
+        self._complete_mro_cache: dict[str, bool] = {}
         self._resolution_candidates_cache: dict[
             tuple[str, str | None],
             tuple[str, ...],
@@ -92,6 +94,8 @@ class PythonIndex:
         self._factory_registrations.clear()
         self._factory_registration_modules.clear()
         self._members_cache.clear()
+        self._mro_cache.clear()
+        self._complete_mro_cache.clear()
         self._resolution_candidates_cache.clear()
         self._revision += 1
 
@@ -103,6 +107,8 @@ class PythonIndex:
         self._uri_modules[module.uri] = module.name
         self._index_module(module)
         self._members_cache.clear()
+        self._mro_cache.clear()
+        self._complete_mro_cache.clear()
         self._resolution_candidates_cache.clear()
         self._revision += 1
 
@@ -113,6 +119,8 @@ class PythonIndex:
 
         if module is not None:
             self._members_cache.clear()
+            self._mro_cache.clear()
+            self._complete_mro_cache.clear()
             self._resolution_candidates_cache.clear()
             self._revision += 1
 
@@ -329,24 +337,56 @@ class PythonIndex:
             class_symbol.qualified_name,
             include_inherited,
         )
-        cached = self._members_cache.get(cache_key)
+        indexed = (
+            self._classes.get(class_symbol.qualified_name) is class_symbol
+        )
+        cached = self._members_cache.get(cache_key) if indexed else None
 
         if cached is not None:
             return cached
 
         members: dict[str, Symbol] = {}
-        visited: set[str] = set()
+        classes = (class_symbol,)
 
-        self._collect_members(
-            class_symbol,
-            members,
-            visited,
-            include_inherited=include_inherited,
-        )
+        if include_inherited:
+            classes = self._class_mro(class_symbol, set()) or classes
+
+        for owner in classes:
+            for member in owner.members:
+                members.setdefault(member.name, member)
 
         result = tuple(members.values())
-        self._members_cache[cache_key] = result
+
+        if indexed:
+            self._members_cache[cache_key] = result
+
         return result
+
+    def has_complete_mro(self, class_symbol: ClassSymbol) -> bool:
+        """Whether every declared base is known and C3 is consistent."""
+        name = class_symbol.qualified_name
+        indexed = self._classes.get(name) is class_symbol
+        if indexed and name in self._complete_mro_cache:
+            return self._complete_mro_cache[name]
+        mro = self._class_mro(class_symbol, set())
+        complete = mro is not None and all(
+            self._has_resolved_bases(owner) for owner in mro
+        )
+        if indexed:
+            self._complete_mro_cache[name] = complete
+        return complete
+
+    def _has_resolved_bases(self, class_symbol: ClassSymbol) -> bool:
+        module_name = self._class_modules.get(class_symbol.qualified_name)
+        for position, reference in enumerate(class_symbol.bases):
+            base = (
+                class_symbol.resolved_bases[position]
+                if class_symbol.resolved_bases else
+                self.resolve_class(reference, from_module=module_name)
+            )
+            if base is None and reference not in {"object", "builtins.object"}:
+                return False
+        return True
 
     def member_named(
         self,
@@ -627,44 +667,97 @@ class PythonIndex:
 
         return ".".join(module_parts)
 
-    def _collect_members(
+    def _class_mro(
         self,
         class_symbol: ClassSymbol,
-        members: dict[str, Symbol],
-        visited: set[str],
-        *,
-        include_inherited: bool,
-    ) -> None:
-        qualified_name = class_symbol.symbol.qualified_name
+        visiting: set[str],
+    ) -> tuple[ClassSymbol, ...] | None:
+        """Linearize known bases with C3; reject cyclic/inconsistent trees."""
+        qualified_name = class_symbol.qualified_name
+        indexed = self._classes.get(qualified_name) is class_symbol
 
-        if qualified_name in visited:
-            return
+        if indexed and qualified_name in self._mro_cache:
+            return self._mro_cache[qualified_name]
 
-        visited.add(qualified_name)
+        if qualified_name in visiting:
+            return None
 
-        for member in class_symbol.members:
-            members.setdefault(member.name, member)
+        visiting.add(qualified_name)
 
-        if not include_inherited:
-            return
+        try:
+            result = self._linearize_bases(class_symbol, visiting)
+        finally:
+            visiting.remove(qualified_name)
 
-        module_name = self._class_modules.get(qualified_name)
+        if indexed:
+            self._mro_cache[qualified_name] = result
 
-        for base_reference in class_symbol.bases:
-            base_class = self.resolve_class(
-                base_reference,
-                from_module=module_name,
-            )
+        return result
+
+    def _linearize_bases(
+        self,
+        class_symbol: ClassSymbol,
+        visiting: set[str],
+    ) -> tuple[ClassSymbol, ...] | None:
+        module_name = self._class_modules.get(class_symbol.qualified_name)
+        bases: list[ClassSymbol] = []
+        sequences: list[list[ClassSymbol]] = []
+
+        for index, base_reference in enumerate(class_symbol.bases):
+            if class_symbol.resolved_bases:
+                base_class = class_symbol.resolved_bases[index]
+            else:
+                base_class = self.resolve_class(
+                    base_reference,
+                    from_module=module_name,
+                )
 
             if base_class is None:
                 continue
 
-            self._collect_members(
-                base_class,
-                members,
-                visited,
-                include_inherited=True,
+            if any(
+                base.qualified_name == base_class.qualified_name
+                for base in bases
+            ):
+                return None
+
+            base_mro = self._class_mro(base_class, visiting)
+
+            if base_mro is None:
+                return None
+
+            bases.append(base_class)
+            sequences.append(list(base_mro))
+
+        sequences.append(bases)
+        result = [class_symbol]
+
+        while any(sequences):
+            sequences = [sequence for sequence in sequences if sequence]
+            tails = {
+                item.qualified_name
+                for sequence in sequences
+                for item in sequence[1:]
+            }
+            candidate = next(
+                (
+                    sequence[0]
+                    for sequence in sequences
+                    if sequence[0].qualified_name not in tails
+                ),
+                None,
             )
+
+            if candidate is None:
+                return None
+
+            result.append(candidate)
+
+            for sequence in sequences:
+                if sequence[0].qualified_name == candidate.qualified_name:
+                    sequence.pop(0)
+
+        return tuple(result)
 
     def _is_widget_class(
         self,

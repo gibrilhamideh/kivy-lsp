@@ -1,0 +1,14 @@
+app-class = "app.windows.primary.window.MainWindow"
+source-roots = ["src"]
+kv-paths = ["src"]
+
+[globals]
+Formatter = "app.shared.formatter.Formatter"
+I18nRef = "kivyfn.i18n.ref.I18nRef"
+
+[i18n]
+source = "src/app/resources/locales/en.json"
+properties = [
+    "i18n_key",
+    "hint_i18n_key",
+]

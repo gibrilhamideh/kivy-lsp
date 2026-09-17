@@ -42,10 +42,15 @@ class RuleSelectorNode(KvNode):
     name: Token
     dynamic_marker: Token | None
     base_names: tuple[Token, ...]
+    class_marker: Token | None = None
 
     @property
     def is_dynamic(self) -> bool:
         return self.dynamic_marker is not None
+
+    @property
+    def is_class_selector(self) -> bool:
+        return self.class_marker is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +62,7 @@ class RuleNode(KvNode):
     closing: Token
     colon: Token
     body: tuple[BodyNode, ...]
+    clear_previous: Token | None = None
 
 
 @dataclass(frozen=True, slots=True)

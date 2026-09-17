@@ -54,10 +54,7 @@ class DependencyScanResult:
 
     @property
     def succeeded(self) -> bool:
-        return (
-            not self.file_errors
-            and not self.package_issues
-        )
+        return not self.file_errors and not self.package_issues
 
 
 class DependencyScanner:
@@ -74,14 +71,18 @@ class DependencyScanner:
         python_index: PythonIndex,
         *,
         packages: Iterable[str] = (),
+        discover_imports: bool = True,
     ) -> DependencyScanResult:
-        project_modules = {
-            module.name
-            for module in python_index.modules
-        }
+        """Index requested packages, optionally discovering Kivy imports.
+
+        Incremental workspace updates pass only newly requested packages and
+        disable discovery so retained dependencies are never walked again.
+        """
+        project_modules = {module.name for module in python_index.modules}
         package_names = self._package_names(
             python_index,
             packages,
+            discover_imports=discover_imports,
         )
         selected_sources: dict[
             str,
@@ -98,10 +99,7 @@ class DependencyScanner:
                 package_issues.append(
                     DependencyPackageIssue(
                         package_name=package_name,
-                        message=(
-                            "No Python source or type stubs "
-                            "were found."
-                        ),
+                        message=("No Python source or type stubs were found."),
                     )
                 )
                 continue
@@ -115,6 +113,37 @@ class DependencyScanner:
                     source,
                 )
 
+        return self._index_sources(
+            python_index, package_names, selected_sources, package_issues
+        )
+
+    def scan_modules(
+        self, python_index: PythonIndex, modules: Iterable[str]
+    ) -> DependencyScanResult:
+        """Restore selected modules without walking their packages again."""
+        selected_sources: dict[str, PythonModuleSource] = {}
+        package_issues: list[DependencyPackageIssue] = []
+        names = sorted(set(modules))
+        for name in names:
+            source = self._locator.find_module(name)
+            if source is None:
+                package_issues.append(
+                    DependencyPackageIssue(name, "No source or stubs found.")
+                )
+            else:
+                selected_sources[name] = source
+        packages = tuple(sorted({name.partition(".")[0] for name in names}))
+        return self._index_sources(
+            python_index, packages, selected_sources, package_issues
+        )
+
+    def _index_sources(
+        self,
+        python_index: PythonIndex,
+        package_names: tuple[str, ...],
+        selected_sources: dict[str, PythonModuleSource],
+        package_issues: list[DependencyPackageIssue],
+    ) -> DependencyScanResult:
         indexed_modules: list[str] = []
         indexed_files: list[Path] = []
         diagnostics: list[DependencyFileDiagnostics] = []
@@ -171,12 +200,12 @@ class DependencyScanner:
         self,
         python_index: PythonIndex,
         packages: Iterable[str],
+        *,
+        discover_imports: bool,
     ) -> tuple[str, ...]:
-        names = {
-            package.strip()
-            for package in packages
-            if package.strip()
-        }
+        names = {package.strip() for package in packages if package.strip()}
+        if not discover_imports:
+            return tuple(sorted(names))
         names.add("kivy")
 
         for module in python_index.modules:

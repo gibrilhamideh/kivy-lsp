@@ -15,9 +15,12 @@ from kivy_lsp.analysis.completion import (
     KvCompletionResult,
 )
 from kivy_lsp.analysis.i18n import TranslationCompletionEngine
+from kivy_lsp.analysis.import_completion import KvImportCompletionEngine
 from kivy_lsp.analysis.python_ids_completion import (
     PythonIdsCompletionEngine,
 )
+from kivy_lsp.python.import_completion import PythonImportCompleter
+from kivy_lsp.python.locator import PythonModuleLocator
 from kivy_lsp.workspace.document import TextDocument, TextPosition
 from kivy_lsp.workspace.project import ProjectWorkspace
 
@@ -137,9 +140,27 @@ def _completion_result(
         return engine.complete(document, offset)
 
     parse_result = workspace.kv_result(uri)
-    semantic_model = workspace.semantic_model(uri)
+    if parse_result is None:
+        return None
 
-    if parse_result is None or semantic_model is None:
+    locator = (
+        PythonModuleLocator(workspace.environment)
+        if workspace.environment is not None
+        else None
+    )
+    import_result = KvImportCompletionEngine(
+        PythonImportCompleter(
+            workspace.python_index,
+            locator,
+            workspace.source_document,
+            workspace.config,
+        )
+    ).complete(document, parse_result, offset)
+    if import_result is not None:
+        return import_result
+
+    semantic_model = workspace.semantic_model(uri)
+    if semantic_model is None:
         return None
 
     i18n_config = workspace.config.i18n

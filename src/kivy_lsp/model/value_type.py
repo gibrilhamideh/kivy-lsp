@@ -31,7 +31,7 @@ class ValueTypeKind(StrEnum):
     UNION = "union"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class ValueType:
     """An editor-neutral static value type."""
 
@@ -39,6 +39,22 @@ class ValueType:
     name: str | None = None
     arguments: tuple[ValueType, ...] = ()
     literals: tuple[LiteralValue, ...] = ()
+
+    def _identity(self) -> tuple[object, ...]:
+        return (
+            self.kind,
+            self.name,
+            self.arguments,
+            tuple((type(value), value) for value in self.literals),
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ValueType):
+            return NotImplemented
+        return self._identity() == other._identity()
+
+    def __hash__(self) -> int:
+        return hash(self._identity())
 
     def __post_init__(self) -> None:
         if self.kind is ValueTypeKind.OBJECT and not self.name:
@@ -384,14 +400,18 @@ def _subscript_type(
 
     if short_name == "Literal":
         values: list[LiteralValue] = []
+        complete = True
 
         for argument in arguments:
             success, value = _literal_value(argument)
 
             if success:
                 values.append(value)
+            else:
+                complete = False
 
-        return literal_type(*values)
+        known = literal_type(*values)
+        return known if complete else union_type(known, UNKNOWN_TYPE)
 
     argument_types = tuple(
         _annotation_node_type(argument)

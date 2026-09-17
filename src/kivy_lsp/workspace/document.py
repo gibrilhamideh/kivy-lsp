@@ -54,6 +54,7 @@ class TextDocument:
     uri: str
     text: str
     version: int | None = None
+    position_encoding: PositionEncoding = PositionEncoding.UTF16
     _line_starts: tuple[int, ...] = field(
         init=False,
         repr=False,
@@ -85,6 +86,7 @@ class TextDocument:
             uri=self.uri,
             text=text,
             version=version,
+            position_encoding=self.position_encoding,
         )
 
     def line_text(self, line: int) -> str:
@@ -96,7 +98,7 @@ class TextDocument:
     def offset_at(
         self,
         position: TextPosition,
-        encoding: PositionEncoding = PositionEncoding.UTF16,
+        encoding: PositionEncoding | None = None,
     ) -> int:
         """Convert a line and character position into a source offset."""
 
@@ -108,14 +110,14 @@ class TextDocument:
         relative = self._offset_for_units(
             text=line_text,
             units=position.character,
-            encoding=encoding,
+            encoding=encoding or self.position_encoding,
         )
         return line_start + relative
 
     def position_at(
         self,
         offset: int,
-        encoding: PositionEncoding = PositionEncoding.UTF16,
+        encoding: PositionEncoding | None = None,
     ) -> TextPosition:
         """Convert an absolute source offset into a text position."""
 
@@ -129,13 +131,15 @@ class TextDocument:
 
         return TextPosition(
             line=line,
-            character=self._unit_length(content, encoding),
+            character=self._unit_length(
+                content, encoding or self.position_encoding
+            ),
         )
 
     def range_at(
         self,
         span: Span,
-        encoding: PositionEncoding = PositionEncoding.UTF16,
+        encoding: PositionEncoding | None = None,
     ) -> TextRange:
         """Convert an internal source span into a text range."""
 
@@ -150,7 +154,7 @@ class TextDocument:
     def span_at(
         self,
         text_range: TextRange,
-        encoding: PositionEncoding = PositionEncoding.UTF16,
+        encoding: PositionEncoding | None = None,
     ) -> Span:
         """Convert a text range into an internal source span."""
 
@@ -170,7 +174,7 @@ class TextDocument:
 
         end = self._line_starts[line + 1]
 
-        if self.text[end - 2:end] == "\r\n":
+        if self.text[end - 2 : end] == "\r\n":
             end -= 2
         elif end > start and self.text[end - 1] in ("\r", "\n"):
             end -= 1

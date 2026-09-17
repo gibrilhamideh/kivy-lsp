@@ -20,7 +20,9 @@ from kivy_lsp.analysis.type_narrowing import (
     branch_narrowings,
     merge_narrowings,
 )
+from kivy_lsp.analysis.value_constraints import ValueConstraintResolver
 from kivy_lsp.analysis.value_inference import KvValueInferer
+from kivy_lsp.kv.expression_source import EmbeddedPythonSource
 from kivy_lsp.model.diagnostic import (
     Diagnostic,
     DiagnosticSeverity,
@@ -76,72 +78,32 @@ _ID_NAMESPACE_MEMBERS = frozenset(
 @dataclass(frozen=True, slots=True)
 class _ParsedPythonSource:
     original: str
-    text: str
-    removed_prefixes: tuple[str, ...]
+    mapped: EmbeddedPythonSource
+
+    @property
+    def text(self) -> str:
+        return self.mapped.text
 
     @classmethod
-    def expression(
-        cls,
-        source: str,
-    ) -> _ParsedPythonSource:
-        lines = source.splitlines(keepends=True)
-
+    def expression(cls, source: str) -> _ParsedPythonSource:
         return cls(
-            original=source,
-            text=source,
-            removed_prefixes=tuple("" for _ in lines),
+            source,
+            EmbeddedPythonSource.from_source(source, Span(0, len(source))),
         )
 
     @classmethod
     def statement_block(
-        cls,
-        source: str,
-        base_indent: str,
+        cls, source: str, base_indent: str,
     ) -> _ParsedPythonSource:
-        lines = source.splitlines(keepends=True)
-        normalized: list[str] = []
-        removed: list[str] = []
-
-        for index, line in enumerate(lines):
-            if (
-                index > 0
-                and base_indent
-                and line.startswith(base_indent)
-            ):
-                normalized.append(line[len(base_indent):])
-                removed.append(base_indent)
-                continue
-
-            normalized.append(line)
-            removed.append("")
-
         return cls(
-            original=source,
-            text="".join(normalized),
-            removed_prefixes=tuple(removed),
+            source,
+            EmbeddedPythonSource.from_source(
+                source, Span(0, len(source)), statement_block=True,
+            ),
         )
 
-    def offset(
-        self,
-        line: int,
-        byte_column: int,
-    ) -> int:
-        line_index = max(0, line - 1)
-        removed_prefix = (
-            self.removed_prefixes[line_index]
-            if line_index < len(self.removed_prefixes)
-            else ""
-        )
-        original_column = (
-            len(removed_prefix.encode("utf-8"))
-            + byte_column
-        )
-
-        return _source_offset(
-            self.original,
-            line,
-            original_column,
-        )
+    def offset(self, line: int, byte_column: int) -> int:
+        return self.mapped.offset(line, byte_column)
 
 
 class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
@@ -150,8 +112,11 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
     def __init__(
         self,
         resolver: KvExpressionResolver,
+        *,
+        constraints: ValueConstraintResolver | None = None,
     ) -> None:
         self._resolver = resolver
+        self._constraints = constraints
         self._value_inferer = KvValueInferer(resolver)
         self._type_checker = KivyPropertyTypeChecker()
         self._source = ""
@@ -215,6 +180,57 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
                 self.visit(statement)
 
         return tuple(self._diagnostics)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+        names = {
+            argument.arg
+            for argument in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            )
+        }
+        for argument in (node.args.vararg, node.args.kwarg):
+            if argument is not None:
+                names.add(argument.arg)
+        previous = self._local_names
+        self._local_names = previous | names
+        try:
+            self.visit(node.body)
+        finally:
+            self._local_names = previous
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node.generators, (node.key, node.value))
+
+    def _visit_comprehension(
+        self,
+        generators: list[ast.comprehension],
+        results: tuple[ast.expr, ...],
+    ) -> None:
+        previous = self._local_names
+        try:
+            for generator in generators:
+                self.visit(generator.iter)
+                self._local_names |= _expression_local_names(generator.target)
+                for condition in generator.ifs:
+                    self.visit(condition)
+            for result in results:
+                self.visit(result)
+        finally:
+            self._local_names = previous
 
     def visit_Name(
         self,
@@ -304,6 +320,9 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
         if any(member.name == node.attr for member in members):
             return
 
+        if not self._resolver.has_complete_members(owner):
+            return
+
         owner_name = _resolution_name(owner)
 
         self._add_diagnostic(
@@ -383,6 +402,67 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
         self._validate_ids_get(
             node,
             scope,
+        )
+
+    def visit_Compare(self, node: ast.Compare) -> None:
+        self.generic_visit(node)
+        constraints = self._constraints
+        scope = self._scope
+        if constraints is None or scope is None:
+            return
+
+        left = node.left
+        for operator, right in zip(node.ops, node.comparators):
+            if isinstance(operator, (ast.Eq, ast.NotEq)):
+                self._validate_comparison(left, operator, right, scope)
+            left = right
+
+    def _validate_comparison(
+        self,
+        left: ast.expr,
+        operator: ast.cmpop,
+        right: ast.expr,
+        scope: KvScope,
+    ) -> None:
+        constraints = self._constraints
+        if constraints is None:
+            return
+        if any(
+            isinstance(item, ast.Name) and item.id in self._local_names
+            for operand in (left, right)
+            for item in ast.walk(operand)
+        ):
+            return
+        first = constraints.for_expression(
+            ast.unparse(left), scope, self_value=self._self_value,
+            narrowings=self._narrowings,
+        )
+        second = constraints.for_expression(
+            ast.unparse(right), scope, self_value=self._self_value,
+            narrowings=self._narrowings,
+        )
+        if not first or not second:
+            return
+        # Python equality intentionally equates True, 1, and 1.0.
+        if any(a == b for a in first for b in second):
+            return
+        result = "false" if isinstance(operator, ast.Eq) else "true"
+        if isinstance(right, ast.Constant):
+            span = self._node_span(right)
+        elif isinstance(left, ast.Constant):
+            span = self._node_span(left)
+        else:
+            span = Span(
+                self._node_span(left).start, self._node_span(right).end,
+            )
+        self._add_diagnostic(
+            message=(
+                f"Comparison is always {result}: the known possible "
+                "values cannot match."
+            ),
+            span=span,
+            code="kv-impossible-comparison",
+            severity=DiagnosticSeverity.WARNING,
         )
 
     def visit_IfExp(
@@ -792,6 +872,7 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
         message: str,
         span: Span,
         code: str,
+        severity: DiagnosticSeverity = DiagnosticSeverity.ERROR,
     ) -> None:
         key = (
             code,
@@ -807,7 +888,7 @@ class KvExpressionDiagnosticAnalyzer(ast.NodeVisitor):
             Diagnostic(
                 message=message,
                 span=span,
-                severity=DiagnosticSeverity.ERROR,
+                severity=severity,
                 code=code,
             )
         )
@@ -854,32 +935,30 @@ def _expression_local_names(
 ) -> frozenset[str]:
     names: set[str] = set()
 
-    for node in ast.walk(tree):
+    pending = [tree]
+    while pending:
+        node = pending.pop()
+        if isinstance(
+            node,
+            (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp,
+             ast.GeneratorExp),
+        ):
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            names.add(node.name)
+            continue
         if (
             isinstance(node, ast.Name)
             and isinstance(node.ctx, ast.Store)
         ):
             names.add(node.id)
-
-        if isinstance(node, ast.Lambda):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
             names.update(
-                argument.arg
-                for argument in node.args.posonlyargs
+                alias.asname or alias.name.split(".")[0]
+                for alias in node.names
             )
-            names.update(
-                argument.arg
-                for argument in node.args.args
-            )
-            names.update(
-                argument.arg
-                for argument in node.args.kwonlyargs
-            )
-
-            if node.args.vararg is not None:
-                names.add(node.args.vararg.arg)
-
-            if node.args.kwarg is not None:
-                names.add(node.args.kwarg.arg)
+        pending.extend(ast.iter_child_nodes(node))
 
     return frozenset(names)
 
@@ -1022,13 +1101,16 @@ def _syntax_diagnostic(
         start_column + 1,
         (error.end_offset or start_column + 2) - 1,
     )
+    lines = source.text.splitlines()
+    start_text = lines[start_line - 1] if start_line <= len(lines) else ""
+    end_text = lines[end_line - 1] if end_line <= len(lines) else ""
     relative_start = source.offset(
         start_line,
-        start_column,
+        len(start_text[:start_column].encode("utf-8")),
     )
     relative_end = source.offset(
         end_line,
-        end_column,
+        len(end_text[:end_column].encode("utf-8")),
     )
 
     if relative_end <= relative_start:

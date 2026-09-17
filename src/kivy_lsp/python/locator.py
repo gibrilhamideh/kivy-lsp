@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import keyword
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -96,6 +98,57 @@ class PythonModuleLocator:
 
         return False
 
+    def module_children(
+        self,
+        parent: str = "",
+        *,
+        prefix: str = "",
+        allow_path: Callable[[Path], bool] | None = None,
+    ) -> tuple[str, ...]:
+        """List immediate importable names without walking subdirectories."""
+        if parent and not _is_module_name(parent):
+            return ()
+
+        selected = self.find_module(parent) if parent else None
+        if selected is not None and not selected.is_package:
+            return ()
+
+        names: set[str] = set()
+        for search_root in self._environment.search_paths:
+            # A regular package shadows namespace portions in other roots.
+            if selected is not None and search_root != selected.search_root:
+                continue
+            bases = (
+                _module_bases(search_root, parent)
+                if parent
+                else ((search_root, False),)
+            )
+            for base, stub_only in bases:
+                if allow_path is not None and not allow_path(base):
+                    continue
+                try:
+                    with os.scandir(base) as entries:
+                        for entry in entries:
+                            if not entry.name.startswith(prefix):
+                                continue
+                            name = _importable_child_name(
+                                entry, parent, stub_only
+                            )
+                            if name is None:
+                                continue
+                            qualified = f"{parent}.{name}" if parent else name
+                            if qualified in names:
+                                continue
+                            if allow_path is not None and not allow_path(
+                                Path(entry.path)
+                            ):
+                                continue
+                            names.add(qualified)
+                except OSError:
+                    continue
+
+        return tuple(sorted(names))
+
     def walk_package(
         self,
         package_name: str,
@@ -154,6 +207,34 @@ def _module_bases(
         (stub_base, True),
         (source_base, False),
     )
+
+
+def _importable_child_name(
+    entry: os.DirEntry[str],
+    parent: str,
+    stub_only: bool,
+) -> str | None:
+    if entry.is_dir():
+        name = entry.name
+        if not parent and name.endswith("-stubs"):
+            name = name.removesuffix("-stubs")
+    elif entry.is_file():
+        suffixes = {".pyi"} if stub_only else {".py", ".pyi", ".so", ".pyd"}
+        name, suffix = os.path.splitext(entry.name)
+        if suffix not in suffixes:
+            return None
+        if suffix in {".so", ".pyd"}:
+            name = name.partition(".")[0]
+    else:
+        return None
+
+    if (
+        name in {"__init__", "__pycache__"}
+        or not name.isidentifier()
+        or keyword.iskeyword(name)
+    ):
+        return None
+    return name
 
 
 def _find_at_base(
